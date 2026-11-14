@@ -6,29 +6,29 @@
     "android": "2.2081",
     "ios": "2.2081"
   },
-  "id": "custom.menu-mod",
-  "name": "Custom Menu Mod",
+  "id": "custom.modmenu",
+  "name": "Practice Mod Menu",
   "version": "1.0.0",
   "developer": "Creator",
-  "description": "Adds a custom greeting popup, top banner label, and interactive menu button to Geometry Dash!",
+  "description": "A floating orb mod menu with Noclip and Hitboxes for Geometry Dash!",
   "settings": {
-    "welcome-message": {
-      "name": "Welcome Popup Message",
-      "description": "The text displayed in the startup popup.",
-      "type": "string",
-      "default": "Hello from your <cy>custom Geode mod</c>!"
-    },
-    "show-popup": {
-      "name": "Show Startup Popup",
-      "description": "Toggle whether the greeting popup appears on launch.",
+    "noclip": {
+      "name": "Noclip",
+      "description": "Disable death on collision.",
       "type": "bool",
-      "default": true
+      "default": false
     },
-    "banner-text": {
-      "name": "Menu Banner Text",
-      "description": "Text displayed at the top of the main menu.",
-      "type": "string",
-      "default": "Geode Mod Active!"
+    "hitboxes": {
+      "name": "Show Hitboxes",
+      "description": "Display object and player hitboxes.",
+      "type": "bool",
+      "default": false
+    },
+    "hitbox-trail": {
+      "name": "Hitbox Trail",
+      "description": "Show trail behind hitboxes.",
+      "type": "bool",
+      "default": false
     }
   }
 }
