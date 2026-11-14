@@ -5,6 +5,17 @@
 using namespace geode::prelude;
 
 class ModMenuPopup : public Popup<> {
+public:
+    static ModMenuPopup* create() {
+        auto ret = new ModMenuPopup();
+        if (ret && ret->init(320.f, 220.f, "GJ_square01.png", { 0.f, 0.f, 356.f, 186.f })) {
+            ret->autorelease();
+            return ret;
+        }
+        CC_SAFE_DELETE(ret);
+        return nullptr;
+    }
+
 protected:
     bool setup() override {
         this->setTitle("Mod Menu");
@@ -22,9 +33,6 @@ protected:
             menu_selector(ModMenuPopup::onToggleNoclip)
         );
         noclipToggle->toggle(Mod::get()->getSettingValue<bool>("noclip"));
-        
-        auto noclipLabel = CCLabelBMFont::create("Noclip", "bigFont.fnt");
-        noclipLabel->setScale(0.4f);
 
         // 2. Hitboxes Toggle
         auto hitboxToggle = CCMenuItemToggler::create(
@@ -35,9 +43,6 @@ protected:
         );
         hitboxToggle->toggle(Mod::get()->getSettingValue<bool>("hitboxes"));
 
-        auto hitboxLabel = CCLabelBMFont::create("Show Hitboxes", "bigFont.fnt");
-        hitboxLabel->setScale(0.4f);
-
         // 3. Hitbox Trail Toggle
         auto trailToggle = CCMenuItemToggler::create(
             CCSprite::createWithSpriteFrameName("GJ_checkOn_001.png"),
@@ -47,15 +52,12 @@ protected:
         );
         trailToggle->toggle(Mod::get()->getSettingValue<bool>("hitbox-trail"));
 
-        auto trailLabel = CCLabelBMFont::create("Hitbox Trail", "bigFont.fnt");
-        trailLabel->setScale(0.4f);
-
         menu->addChild(noclipToggle);
         menu->addChild(hitboxToggle);
         menu->addChild(trailToggle);
         menu->updateLayout();
 
-        this->m_mainLayer->addChild(menu);
+        this->addChild(menu);
         return true;
     }
 
@@ -72,17 +74,6 @@ protected:
     void onToggleTrail(CCObject* sender) {
         bool val = !Mod::get()->getSettingValue<bool>("hitbox-trail");
         Mod::get()->setSettingValue<bool>("hitbox-trail", val);
-    }
-
-public:
-    static ModMenuPopup* create() {
-        auto ret = new ModMenuPopup();
-        if (ret && ret->init(320.f, 220.f)) {
-            ret->autorelease();
-            return ret;
-        }
-        CC_SAFE_DELETE(ret);
-        return nullptr;
     }
 };
 
