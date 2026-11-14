@@ -6,12 +6,17 @@
 #include <Geode/modify/MenuLayer.hpp>
 #include <Geode/modify/CCKeyboardDispatcher.hpp>
 #include <Geode/ui/OverlayManager.hpp>
+#include <Geode/ui/ScrollLayer.hpp>
+#include <Geode/ui/TextInput.hpp>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <ctime>
 #include <deque>
 #include <functional>
+#include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -23,13 +28,19 @@ static bool opt(char const* k) { return optd(k, false); }
 static void setOpt(char const* k, bool v) { Mod::get()->setSavedValue<bool>(k, v); }
 static double getVal(char const* k, double d) { return Mod::get()->getSavedValue<double>(k, d); }
 static void setVal(char const* k, double v) { Mod::get()->setSavedValue<double>(k, v); }
+static std::string getStr(char const* k, std::string d) { return Mod::get()->getSavedValue<std::string>(k, d); }
+static void setStr(char const* k, std::string v) { Mod::get()->setSavedValue<std::string>(k, v); }
 
 static constexpr size_t TRAIL_LEN = 240;
 static constexpr size_t TRAIL_STEP = 3;
+static constexpr float ROWH = 28.3f;
 
 static float s_fps = 60.f;
 static float s_hue = 0.f;
 static std::deque<double> s_clicks;
+static bool s_forceKill = false;   // lets our own accuracy/death limits kill through noclip
+static bool s_extBlock = false;    // a death was blocked by the PlayerObject fallback
+static int s_attemptClicks = 0;
 
 static double nowSec() {
     using namespace std::chrono;
@@ -45,13 +56,17 @@ static std::vector<char const*> const COLNAMES = {
     "Cyan", "Green", "Red", "Orange", "Yellow", "Purple", "Pink", "Blue", "White"
 };
 static std::vector<char const*> const ACCNAMES = {
-    "Cyan", "Green", "Red", "Orange", "Yellow", "Purple", "Pink", "Blue", "White", "Rainbow"
+    "Default", "Cyan", "Green", "Red", "Orange", "Yellow", "Purple", "Pink", "Blue", "White", "Rainbow"
 };
-static ccColor3B const PANELS[6] = {
-    {0, 0, 0}, {10, 15, 50}, {35, 10, 55}, {55, 10, 15}, {10, 40, 20}, {45, 45, 50}
-};
-static std::vector<char const*> const PANELNAMES = {"Black", "Navy", "Purple", "Maroon", "Forest", "Gray"};
-static std::vector<char const*> const THEMENAMES = {"Dark", "Classic", "Glass", "Sharp", "Neon", "Gradient"};
+
+// menu palette (matches the screenshots)
+static ccColor3B const C_PANEL {38, 40, 66};
+static ccColor3B const C_SIDE  {33, 35, 58};
+static ccColor3B const C_BTN   {58, 61, 88};
+static ccColor3B const C_INPUT {27, 28, 46};
+static ccColor3B const C_SEL   {200, 206, 255};
+static ccColor3B const C_DARK  {28, 30, 50};
+static ccColor3B const C_WHITE {255, 255, 255};
 
 static ccColor3B hsv(float h) {
     h = h - std::floor(h);
@@ -71,7 +86,9 @@ static ccColor3B colIdx(char const* key, int def) {
 }
 static ccColor3B accentColor() {
     int i = (int)getVal("accent", 0);
-    return i >= 9 ? hsv(s_hue) : COLS[std::clamp(i, 0, 8)];
+    if (i <= 0) return C_SEL;
+    if (i >= 10) return hsv(s_hue);
+    return COLS[std::clamp(i - 1, 0, 8)];
 }
 static ccColor4F f4(ccColor3B c, float a) { return {c.r / 255.f, c.g / 255.f, c.b / 255.f, a}; }
 
@@ -84,128 +101,350 @@ static void drawRect(CCDrawNode* n, CCRect const& rc, ccColor4F col, bool fill, 
     n->drawPolygon(v, 4, fc, th, col);
 }
 
-// ───────────────────────── menu definition ─────────────────────────
-struct Row {
-    char const* key = "";
-    char const* label = "";
-    bool def = false;              // default toggle state
-    char const* valKey = nullptr;  // stepper value key
-    float vmin = 0, vmax = 0, step = 0, vdef = 0;
-    std::vector<char const*> names; // stepper shows names instead of numbers
-    bool plain = false;            // stepper only, no toggle
-    bool button = false;           // push button
+// ───────────────────────── labels (in-game) ─────────────────────────
+struct LblDef { char const* id; char const* name; };
+static std::vector<LblDef> const LBLS = {
+    {"fps", "FPS"}, {"testmode", "Testmode"}, {"runfrom", "Run From"}, {"attempt", "Attempt"},
+    {"pct", "Percentage"}, {"time", "Level Time"}, {"best", "Best Run"}, {"clock", "Clock"},
+    {"cps", "CPS"}, {"nca", "Noclip Accuracy"}, {"ncd", "Noclip Deaths"},
+    {"jumps", "Jumps"}, {"level", "Level Name"}
 };
-struct Tab { char const* name; std::vector<Row> rows; };
+static std::string lblName(std::string const& id) {
+    for (auto& d : LBLS) if (id == d.id) return d.name;
+    return id;
+}
+static std::vector<std::string> s_order;
+static bool s_orderLoaded = false;
+static std::vector<std::string>& lblOrder() {
+    if (!s_orderLoaded) {
+        std::string def;
+        for (auto& d : LBLS) { def += d.id; def += ","; }
+        std::string s = getStr("lblorder", def);
+        std::string cur;
+        for (char c : s) {
+            if (c == ',') { if (!cur.empty()) s_order.push_back(cur); cur.clear(); }
+            else cur += c;
+        }
+        if (!cur.empty()) s_order.push_back(cur);
+        s_orderLoaded = true;
+    }
+    return s_order;
+}
+static void saveOrder() {
+    std::string s;
+    for (auto& i : s_order) { s += i; s += ","; }
+    setStr("lblorder", s);
+}
 
-static Row T(char const* key, char const* label, bool def = false) {
-    Row r; r.key = key; r.label = label; r.def = def; return r;
+// ───────────────────────── menu definition ─────────────────────────
+struct Feat {
+    enum K { Toggle, Input, Stepper, Button, Note };
+    K k = Toggle;
+    std::string label, key, info, gear;
+    bool def = false;
+    std::string valKey;
+    double vdef = 0, vmin = 0, vmax = 0, step = 0;
+    std::vector<char const*> names;
+};
+struct Tab { char const* name; std::vector<Feat> feats; };
+
+static std::string autoKey(std::string const& s) {
+    std::string r;
+    for (char c : s) if (std::isalnum((unsigned char)c)) r += (char)std::tolower((unsigned char)c);
+    return r;
 }
-static Row S(char const* key, char const* label, char const* vk, float mn, float mx, float st, float vd) {
-    Row r; r.key = key; r.label = label; r.valKey = vk; r.vmin = mn; r.vmax = mx; r.step = st; r.vdef = vd; return r;
+// toggle (key derived from label)
+static Feat Tg(std::string label, std::string info = "", std::string gear = "", bool def = false) {
+    Feat f; f.k = Feat::Toggle; f.label = label; f.key = autoKey(label);
+    f.info = info; f.gear = gear; f.def = def; return f;
 }
-static Row P(char const* label, char const* vk, float mn, float mx, float st, float vd,
-             std::vector<char const*> names = {}) {
-    Row r; r.key = vk; r.label = label; r.valKey = vk; r.vmin = mn; r.vmax = mx; r.step = st; r.vdef = vd;
-    r.names = std::move(names); r.plain = true; return r;
+// toggle with explicit key
+static Feat TK(char const* key, std::string label, bool def = false) {
+    Feat f; f.k = Feat::Toggle; f.label = label; f.key = key; f.def = def; return f;
 }
-static Row B(char const* key, char const* label) {
-    Row r; r.key = key; r.label = label; r.button = true; return r;
+// toggle + number text box
+static Feat Inp(std::string label, char const* valKey, double vdef, std::string info = "") {
+    Feat f; f.k = Feat::Input; f.label = label; f.key = autoKey(label);
+    f.valKey = valKey; f.vdef = vdef; f.info = info; return f;
+}
+// stepper only
+static Feat Sp(std::string label, char const* valKey, double mn, double mx, double st, double vd,
+               std::vector<char const*> names = {}) {
+    Feat f; f.k = Feat::Stepper; f.label = label; f.valKey = valKey;
+    f.vmin = mn; f.vmax = mx; f.step = st; f.vdef = vd; f.names = std::move(names); return f;
+}
+// toggle + stepper
+static Feat St(std::string label, char const* key, char const* valKey, double mn, double mx, double st, double vd) {
+    Feat f = Sp(label, valKey, mn, mx, st, vd); f.key = key; return f;
+}
+static Feat Bt(std::string label, char const* key) {
+    Feat f; f.k = Feat::Button; f.label = label; f.key = key; return f;
+}
+static Feat Nt(std::string text) {
+    Feat f; f.k = Feat::Note; f.label = text; return f;
 }
 
 static std::vector<Tab> const& tabs() {
     static std::vector<Tab> t = {
         {"Global", {
-            S("speedhack", "Speedhack", "speed", 0.1f, 5.f, 0.1f, 1.f),
-            T("safemode", "Safe Mode"),
-            T("autosafe", "Auto Safe Mode", true),
-            T("unlockicons", "Unlock Icons"),
-            T("notify", "Toggle Notifications"),
-            B("resetdot", "Reset Dot Position"),
+            Inp("Physics Bypass", "physicsbypass", 240),
+            Inp("Speedhack", "speed", 1, "Changes the game speed while in a level."),
+            Inp("Pitch Shift", "pitchshift", 1),
+            Inp("Audio Speed", "audiospeed", 1),
+            Tg("Sync with Speedhack"),
+            Tg("Auto Safe Mode", "Turns on Safe Mode automatically once a cheat is used.", "autosafe", true),
+            Tg("Click Between Steps"),
+            Tg("Click On Steps"),
+            Tg("Compact Editor Levels"),
+            Tg("Compact Profile Comments"),
+            Tg("No Short Numbers", "", "nsn"),
+            Tg("Safe Mode", "Completions and progress are not saved.", "safemode"),
+            Tg("Show Taps", "", "taps"),
         }},
         {"Level", {
-            T("hitbox", "Show Hitboxes"),
-            T("hitdeath", "Hitboxes On Death"),
-            T("fill", "Fill Hitboxes"),
-            T("trail", "Hitbox Trail"),
-            S("customtrail", "Trail Length", "traillen", 30.f, 600.f, 30.f, 240.f),
-            T("autopractice", "Auto Practice Mode"),
-            T("autoldm", "Auto LDM"),
-            P("Hazard Color", "hazcol", 0, 8, 1, 2, COLNAMES),
-            P("Solid Color", "solidcol", 0, 8, 1, 7, COLNAMES),
-            P("Player Color", "plrcol", 0, 8, 1, 4, COLNAMES),
-            P("Trail Color", "trailcol", 0, 8, 1, 2, COLNAMES),
-            P("Line Thickness", "hbthick", 0.5f, 3.f, 0.5f, 1.f),
+            Tg("0% Practice Completion"),
+            Tg("Accurate Percentage", "Shows two decimals on the percentage label.", "accpct"),
+            Tg("All Modes in Platformer"),
+            Tg("All Passable"),
+            Tg("Always Show Coins"),
+            Tg("Auto LDM", "Turns on Low Detail Mode."),
+            Tg("Auto Pickup Coins"),
+            Tg("Auto Practice Mode", "Enters practice mode when a level starts."),
+            Tg("Auto Song Download"),
+            Tg("Checkpoint Delay"),
+            Tg("Confirm Full Restart"),
+            Tg("Confirm Practice Mode", "", "cpm"),
+            Tg("Confirm Restart"),
+            Tg("Force Platformer"),
+            Tg("Freeze Attempts", "The attempt counter stops increasing."),
+            Tg("Hide Level Complete VFX"),
+            Tg("Hide Pause Menu"),
+            Tg("Hitbox Multiplier", "", "hbm"),
+            Tg("Instant Mirror"),
+            Tg("Layout Mode", "", "layout"),
+            Tg("Legacy Pulse", "", "lpulse"),
+            Tg("Legacy Reverse Physics"),
+            Tg("Legacy Trail", "", "ltrail"),
+            Tg("Match Percent/Time Fonts"),
+            Tg("Mute Level SFX"),
+            Tg("No End Shake"),
+            Tg("No Mirror"),
+            Tg("No Music Fade Out"),
+            Tg("No Object Glow"),
+            Tg("No Particles", "", "noparticles"),
+            Tg("No Portal Lightning"),
+            Tg("No Shaders"),
+            Tg("Pause Countdown", "", "pausecd"),
+            Tg("Pause During Complete"),
+            Tg("Practice Coins"),
+            Tg("Practice Fix"),
+            Tg("Random Seed", "", "rseed"),
+            Tg("Show Hitboxes", "Draws object and player hitboxes.", "hitbox"),
+            Tg("Hitboxes On Death", "Shows hitboxes only after you die.", "hitbox"),
+            Tg("Show Triggers"),
+            Tg("Smart StartPos"),
+            Tg("StartPos Switcher", "", "spswitch"),
+            Tg("Stop Triggers on Death", "", "stopdeath"),
+        }},
+        {"Bypass", {
+            Tg("Allow Low Volume"), Tg("Character Filter Bypass"),
+            Tg("Character Limit Bypass"), Tg("Checkpoint Limit"),
+            Tg("Quick Chests"), Tg("Instant Complete"),
+            Tg("Level Kick"), Tg("Menu Gameplay"),
+            Tg("Music Customizer"), Tg("Pause Buffering"),
+            Tg("Practice Music Sync"), Tg("Show Spam Comments"),
+            Tg("Swift Click"), Tg("Unlock Icons", "Every icon and colour is unlocked."),
+            Tg("Unlock Main Levels"), Tg("Unlock Paths"),
+            Tg("Unlock Shops"), Tg("Unlock Vaults"),
         }},
         {"Player", {
-            T("noclip", "Noclip"),
-            T("noclip_p1", "Noclip P1 Only"),
-            T("noclip_p2", "Noclip P2 Only"),
-            T("jumphack", "Jump Hack"),
-            T("nodeatheffect", "No Death Effect"),
-            T("hideplayer", "Hide Player"),
+            Tg("Always Show Trail"), Tg("AutoClicker", "", "autoclicker"),
+            Tg("Auto Kill", "", "autokill"), Tg("Ball Rotation Bug", "", "ballrot"),
+            Tg("Custom Wave Trail", "", "cwt"), Tg("Force Ghost Trail"),
+            Tg("Frame Stepper", "", "fstep"), Tg("Hide Player", "Makes the player invisible."),
+            Tg("Jump Hack", "Lets you jump at any time."), Tg("Mute Level Audio on Death"),
+            Tg("Mute Rewards SFX on Death"), Tg("No Death Effect", "Skips the death explosion."),
+            Tg("No Ghost Trail"), Tg("No Hide Trigger"),
+            Tg("No Platformer Jump Anim"), Tg("No Respawn Flash"),
+            Tg("No Robot Fire"), Tg("No Spider Dash"),
+            Tg("No Trail"), Tg("No Vehicle Particles"),
+            Tg("No Wave Trail Behind"), Tg("Noclip", "Take no damage from hazards and solids.", "noclip"),
+            Tg("Shipcopter"), Tg("Show Trajectory", "", "traj"),
+            Tg("Solid Wave Trail"), Tg("Wave Trail On Death", "", "wtod"),
+            Inp("Respawn Delay", "respawndelay", 1),
         }},
-        {"Noclip", {
-            T("ncflash", "Noclip Flash"),
-            P("Flash Color", "flashcol", 0, 8, 1, 2, COLNAMES),
-            P("Flash Opacity", "flashop", 0.1f, 1.f, 0.1f, 0.4f),
-            T("nc_practice", "Only In Practice"),
-            T("nc_hazonly", "Pass Hazards Only"),
-            T("nc_solidonly", "Pass Solids Only"),
-            S("nc_after", "Start At %", "ncafter", 0.f, 100.f, 5.f, 0.f),
-            S("nc_until", "Stop At %", "ncuntil", 0.f, 100.f, 5.f, 100.f),
-            S("nclimit", "Min Accuracy %", "nclimitv", 50.f, 100.f, 1.f, 95.f),
-            S("ncdlimit", "Max NC Deaths", "ncdlimitv", 1.f, 100.f, 1.f, 10.f),
-            T("nc_redhit", "Red Hitbox On Block"),
+        {"Bot", { Nt("Nothing here yet.") }},
+        {"Creator", { Nt("Nothing here yet.") }},
+        {"Labels", {}},   // custom page
+        {"Shortcuts", {
+            Bt("Restart Level", "sc_restart"),
+            Bt("Toggle Practice Mode", "sc_practice"),
+            Bt("Respawn From Start", "sc_full"),
+            Bt("Toggle Hitboxes", "sc_hitbox"),
+            Bt("Toggle Noclip", "sc_noclip"),
         }},
-        {"Labels", {
-            T("lbl_master", "Show Labels", true),
-            S("lbl_size", "Label Size", "lblscale", 0.5f, 2.f, 0.1f, 1.f),
-            P("Label Color", "lblcol", 0, 8, 1, 8, COLNAMES),
-            P("Label Opacity", "lblop", 0.1f, 1.f, 0.1f, 0.8f),
-            T("lbl_fps", "FPS"),
-            T("lbl_pct", "Percentage"),
-            T("lbl_acc", "Accurate Percentage"),
-            T("lbl_attempt", "Attempt"),
-            T("lbl_time", "Level Time"),
-            T("lbl_best", "Best Run"),
-            T("lbl_clock", "Clock"),
-            T("lbl_cps", "CPS"),
-            T("lbl_nca", "Noclip Accuracy"),
-            T("lbl_ncd", "Noclip Deaths"),
-            T("lbl_test", "Testmode / Safe Mode"),
-        }},
-        {"Style", {
-            P("Theme", "theme", 0, 5, 1, 0, THEMENAMES),
-            P("Accent", "accent", 0, 9, 1, 0, ACCNAMES),
-            P("Panel Color", "panelcol", 0, 5, 1, 0, PANELNAMES),
-            P("Menu Opacity", "menuop", 0.2f, 1.f, 0.1f, 0.8f),
-            P("Dot Size", "dotsize", 10, 30, 2, 18),
-            P("Dot Opacity", "dotop", 0.1f, 1.f, 0.1f, 0.6f),
-            B("resetstyle", "Reset Style"),
+        {"Interface", {
+            Sp("Accent", "accent", 0, 10, 1, 0, ACCNAMES),
+            Sp("Menu Opacity", "menuop", 0.2, 1, 0.1, 0.95),
+            Sp("Dot Size", "dotsize", 10, 30, 2, 18),
+            Sp("Dot Opacity", "dotop", 0.1, 1, 0.1, 0.6),
+            TK("togglenotifications", "Toggle Notifications"),
+            Bt("Reset Dot Position", "resetdot"),
+            Bt("Reset Style", "resetstyle"),
         }},
     };
     return t;
 }
+static int const LABELS_TAB = 5;
 
-static std::string fmtVal(Row const& r, double v) {
+// sub-pages opened with the gear buttons
+static std::vector<Feat> const& subPage(std::string const& id) {
+    static std::map<std::string, std::vector<Feat>> m = {
+        {"noclip", {
+            TK("noclip_p1", "Noclip P1 Only"),
+            TK("noclip_p2", "Noclip P2 Only"),
+            TK("ncflash", "Noclip Flash"),
+            Sp("Flash Color", "flashcol", 0, 8, 1, 2, COLNAMES),
+            Sp("Flash Opacity", "flashop", 0.1, 1, 0.1, 0.4),
+            TK("nc_practice", "Only In Practice"),
+            TK("nc_hazonly", "Pass Hazards Only"),
+            TK("nc_solidonly", "Pass Solids Only"),
+            TK("nc_redhit", "Red Hitbox On Block"),
+            St("Start At %", "nc_after", "ncafter", 0, 100, 5, 0),
+            St("Stop At %", "nc_until", "ncuntil", 0, 100, 5, 100),
+            St("Min Accuracy %", "nclimit", "nclimitv", 50, 100, 1, 95),
+            St("Max NC Deaths", "ncdlimit", "ncdlimitv", 1, 100, 1, 10),
+        }},
+        {"hitbox", {
+            TK("fill", "Fill Hitboxes"),
+            TK("trail", "Hitbox Trail"),
+            St("Trail Length", "customtrail", "traillen", 30, 600, 30, 240),
+            Sp("Hazard Color", "hazcol", 0, 8, 1, 2, COLNAMES),
+            Sp("Solid Color", "solidcol", 0, 8, 1, 7, COLNAMES),
+            Sp("Player Color", "plrcol", 0, 8, 1, 4, COLNAMES),
+            Sp("Trail Color", "trailcol", 0, 8, 1, 2, COLNAMES),
+            Sp("Line Thickness", "hbthick", 0.5, 3, 0.5, 1),
+        }},
+        {"labelstyle", {
+            Sp("Label Size", "lblscale", 0.5, 2, 0.1, 1),
+            Sp("Label Color", "lblcol", 0, 8, 1, 8, COLNAMES),
+            Sp("Label Opacity", "lblop", 0.1, 1, 0.1, 0.8),
+        }},
+    };
+    static std::vector<Feat> const empty = { Nt("No extra options for this feature yet.") };
+    auto it = m.find(id);
+    return it == m.end() ? empty : it->second;
+}
+
+static bool isImpl(std::string const& k) {
+    static std::set<std::string> const s = {
+        "speedhack", "safemode", "autosafemode", "noclip", "jumphack", "hideplayer", "nodeatheffect",
+        "unlockicons", "autoldm", "autopracticemode", "showhitboxes", "hitboxesondeath",
+        "accuratepercentage", "freezeattempts", "notrail", "showlabels", "cheatindicator", "togglenotifications"
+    };
+    return s.count(k) > 0;
+}
+
+static std::string fmtVal(Feat const& r, double v) {
     if (!r.names.empty()) {
         int i = std::clamp((int)std::lround(v), 0, (int)r.names.size() - 1);
         return r.names[i];
     }
-    return r.step >= 1.f ? fmt::format("{:.0f}", v) : fmt::format("{:.1f}", v);
+    return r.step >= 1.0 ? fmt::format("{:.0f}", v) : fmt::format("{:.1f}", v);
 }
 
-static CCNode* makePill(char const* text, float w, float h, float fs, ccColor3B col, GLubyte op) {
-    auto bg = CCScale9Sprite::create("square02b_001.png", {0, 0, 80, 80});
-    bg->setContentSize({w, h});
-    bg->setColor(col);
-    bg->setOpacity(op);
+// ───────────────────────── widgets ─────────────────────────
+static CCScale9Sprite* makeBox(float w, float h, ccColor3B col, GLubyte op = 255) {
+    auto s = CCScale9Sprite::create("square02b_001.png", {0, 0, 80, 80});
+    s->setContentSize({w * 3.f, h * 3.f});
+    s->setScale(1.f / 3.f);
+    s->setColor(col);
+    s->setOpacity(op);
+    return s;
+}
+
+static CCNode* makePill(char const* text, float w, float h, float fs, ccColor3B col, GLubyte op,
+                        ccColor3B tc = {255, 255, 255}) {
+    auto n = CCNode::create();
+    n->setContentSize({w, h});
+    auto b = makeBox(w, h, col, op);
+    b->setPosition({w / 2, h / 2});
+    b->setTag(78);
+    n->addChild(b);
     auto l = CCLabelBMFont::create(text, "bigFont.fnt");
     l->setScale(fs);
+    l->limitLabelWidth(w - 10.f, fs, 0.1f);
     l->setPosition({w / 2, h / 2});
+    l->setColor(tc);
     l->setTag(77);
-    bg->addChild(l);
-    return bg;
+    n->addChild(l);
+    return n;
+}
+
+static CCNode* iconInfo() {
+    auto n = CCNode::create();
+    n->setContentSize({14, 14});
+    auto d = CCDrawNode::create();
+    d->drawDot({7, 7}, 7, {1.f, 1.f, 1.f, 1.f});
+    n->addChild(d);
+    auto l = CCLabelBMFont::create("i", "bigFont.fnt");
+    l->setScale(0.38f);
+    l->setColor(C_PANEL);
+    l->setPosition({7, 7.5f});
+    n->addChild(l);
+    return n;
+}
+static CCNode* iconGear() {
+    auto n = CCNode::create();
+    n->setContentSize({22, 22});
+    auto b = makeBox(22, 22, C_BTN);
+    b->setPosition({11, 11});
+    n->addChild(b);
+    auto d = CCDrawNode::create();
+    CCPoint c {11.f, 11.f};
+    float r = 7.f;
+    for (int i = 0; i < 8; i++) {
+        float a = i * 3.14159265f / 4.f;
+        d->drawSegment({c.x + std::cos(a) * r * 0.6f, c.y + std::sin(a) * r * 0.6f},
+                       {c.x + std::cos(a) * r * 1.05f, c.y + std::sin(a) * r * 1.05f},
+                       r * 0.2f, {1.f, 1.f, 1.f, 1.f});
+    }
+    d->drawDot(c, r * 0.78f, {1.f, 1.f, 1.f, 1.f});
+    d->drawDot(c, r * 0.34f, f4(C_BTN, 1.f));
+    n->addChild(d);
+    return n;
+}
+static CCNode* iconTrash() {
+    auto n = CCNode::create();
+    n->setContentSize({22, 22});
+    auto b = makeBox(22, 22, C_BTN);
+    b->setPosition({11, 11});
+    n->addChild(b);
+    auto d = CCDrawNode::create();
+    ccColor4F w {1.f, 1.f, 1.f, 1.f};
+    CCPoint body[4] = {{6.5f, 4.f}, {15.5f, 4.f}, {14.5f, 14.f}, {7.5f, 14.f}};
+    d->drawPolygon(body, 4, w, 0.f, {0, 0, 0, 0});
+    d->drawSegment({5.f, 15.5f}, {17.f, 15.5f}, 0.9f, w);
+    d->drawSegment({9.f, 15.5f}, {9.f, 17.5f}, 0.7f, w);
+    d->drawSegment({13.f, 15.5f}, {13.f, 17.5f}, 0.7f, w);
+    d->drawSegment({9.f, 17.5f}, {13.f, 17.5f}, 0.7f, w);
+    ccColor4F g = f4(C_BTN, 1.f);
+    d->drawSegment({9.f, 6.f}, {9.f, 12.f}, 0.6f, g);
+    d->drawSegment({11.f, 6.f}, {11.f, 12.f}, 0.6f, g);
+    d->drawSegment({13.f, 6.f}, {13.f, 12.f}, 0.6f, g);
+    n->addChild(d);
+    return n;
+}
+static CCNode* iconArrow(bool up) {
+    auto n = CCNode::create();
+    n->setContentSize({22, 22});
+    auto d = CCDrawNode::create();
+    CCPoint t[3];
+    if (up) { t[0] = {3.f, 5.f}; t[1] = {19.f, 5.f}; t[2] = {11.f, 17.f}; }
+    else    { t[0] = {3.f, 17.f}; t[1] = {19.f, 17.f}; t[2] = {11.f, 5.f}; }
+    d->drawPolygon(t, 3, {0.88f, 0.9f, 1.f, 1.f}, 0.f, {0, 0, 0, 0});
+    n->addChild(d);
+    return n;
 }
 
 // ───────────────────────── draggable dot ─────────────────────────
@@ -284,21 +523,24 @@ public:
 };
 
 // ───────────────────────── menu ─────────────────────────
-class ModMenu : public CCNode {
+class ModMenu : public CCNode, public CCTouchDelegate {
 public:
     static inline ModMenu* s_inst = nullptr;
     CCNode* m_panel = nullptr;
     CCNode* m_bg = nullptr;
-    CCDrawNode* m_border = nullptr;
-    CCLabelBMFont* m_title = nullptr;
     CCNode* m_content = nullptr;
     DotNode* m_dot = nullptr;
     std::vector<CCNode*> m_tabPills;
     std::vector<CCLabelBMFont*> m_valLabels;
+    std::vector<Feat> m_feats;     // features currently on screen (button tags index this)
+    std::string m_sub, m_subTitle; // open gear sub-page
     int m_tab = 0;
+    int m_preset = 0;
     bool m_open = false;
     float m_fps = 60.f;
-    CCSize m_ps {540.f, 262.f};
+    CCSize m_ps {476.f, 275.f};
+    float m_sbW = 114.f;
+    float m_cx = 0, m_cy = 0, m_cw = 0, m_ch = 0; // scroll area (panel space)
 
     static ModMenu* create() {
         auto r = new ModMenu();
@@ -307,42 +549,48 @@ public:
         return nullptr;
     }
 
+    ~ModMenu() override { CCTouchDispatcher::get()->removeDelegate(this); }
+
     bool init() override {
         if (!CCNode::init()) return false;
         auto win = CCDirector::get()->getWinSize();
+        m_ps = {std::floor(win.width * 0.67f), std::floor(win.height * 0.86f)};
         auto ps = m_ps;
+        m_sbW = std::floor(ps.width * 0.24f);
+
+        float contentX = 8.f + m_sbW + 8.f;
+        m_cx = contentX + 5.f;
+        m_cy = 12.f;
+        m_cw = ps.width - contentX - 8.f - 10.f;
+        m_ch = ps.height - 24.f;
 
         m_panel = CCNode::create();
         m_panel->setContentSize(ps);
-        m_panel->setAnchorPoint({0.5f, 1.f});
-        m_panel->setPosition({win.width / 2, win.height + ps.height + 20.f});
+        m_panel->setAnchorPoint({0.5f, 0.5f});
+        m_panel->setPosition({win.width / 2, win.height / 2});
+        m_panel->setScale(0.01f);
+        m_panel->setVisible(false);
         this->addChild(m_panel);
 
         m_bg = CCNode::create();
         m_panel->addChild(m_bg);
-        m_border = CCDrawNode::create();
-        m_panel->addChild(m_border);
-
-        m_title = CCLabelBMFont::create("Hitbox Menu", "goldFont.fnt");
-        m_title->setScale(0.55f);
-        m_title->setPosition({ps.width / 2, ps.height - 14.f});
-        m_panel->addChild(m_title);
 
         auto tabMenu = CCMenu::create();
         tabMenu->setPosition({0, 0});
-        m_panel->addChild(tabMenu);
+        m_panel->addChild(tabMenu, 2);
         auto& TB = tabs();
+        float pitch = (ps.height - 16.f) / (float)TB.size();
         for (int i = 0; i < (int)TB.size(); i++) {
-            auto pill = makePill(TB[i].name, 90.f, 28.f, 0.45f, {50, 50, 60}, 220);
+            auto pill = makePill(TB[i].name, m_sbW - 8.f, pitch - 4.f, 0.42f, C_BTN, 255);
             m_tabPills.push_back(pill);
             auto item = CCMenuItemSpriteExtra::create(pill, this, menu_selector(ModMenu::onTab));
             item->setTag(i);
-            item->setPosition({54.f, ps.height - 54.f - i * 34.f});
+            item->setPosition({8.f + m_sbW / 2, ps.height - 8.f - pitch * (i + 0.5f)});
             tabMenu->addChild(item);
         }
 
         m_content = CCNode::create();
-        m_panel->addChild(m_content);
+        m_panel->addChild(m_content, 1);
 
         m_dot = DotNode::create([this]() { this->toggle(); });
         if (m_dot) this->addChild(m_dot, 5);
@@ -353,169 +601,401 @@ public:
         return true;
     }
 
+    // ── touch blocker so taps on the panel don't reach the game ──
+    bool ccTouchBegan(CCTouch* t, CCEvent*) override {
+        if (!m_open || !m_panel) return false;
+        auto p = m_panel->convertTouchToNodeSpace(t);
+        if (!CCRect(0, 0, m_ps.width, m_ps.height).containsPoint(p)) return false;
+        if (CCRect(m_cx, m_cy, m_cw, m_ch).containsPoint(p)) return false; // scroll layer handles it
+        return true;
+    }
+    void ccTouchMoved(CCTouch*, CCEvent*) override {}
+    void ccTouchEnded(CCTouch*, CCEvent*) override {}
+    void ccTouchCancelled(CCTouch*, CCEvent*) override {}
+
     // ── styling ──
     void recolorTabs() {
         auto ac = accentColor();
         for (int i = 0; i < (int)m_tabPills.size(); i++) {
-            auto bg = static_cast<CCScale9Sprite*>(m_tabPills[i]);
             bool sel = i == m_tab;
-            bg->setColor(sel ? ac : ccColor3B{50, 50, 60});
-            bg->setOpacity(sel ? 255 : 220);
-            if (auto l = static_cast<CCLabelBMFont*>(bg->getChildByTag(77)))
-                l->setColor(sel ? ccColor3B{0, 0, 0} : ccColor3B{255, 255, 255});
+            if (auto b = static_cast<CCScale9Sprite*>(m_tabPills[i]->getChildByTag(78)))
+                b->setColor(sel ? ac : C_BTN);
+            if (auto l = static_cast<CCLabelBMFont*>(m_tabPills[i]->getChildByTag(77)))
+                l->setColor(sel ? C_DARK : C_WHITE);
         }
     }
 
-    void drawBorder() {
-        m_border->clear();
-        int th = (int)getVal("theme", 0);
-        if (th != 4 && th != 5) return;
-        auto ps = m_ps;
-        CCPoint v[4] = {{1, 1}, {ps.width - 1, 1}, {ps.width - 1, ps.height - 1}, {1, ps.height - 1}};
-        m_border->drawPolygon(v, 4, {0, 0, 0, 0}, 1.5f, f4(accentColor(), 1.f));
-    }
-
     void applyLight() {
-        m_title->setColor(accentColor());
         recolorTabs();
-        drawBorder();
         if (m_dot) m_dot->rebuild();
     }
 
     void applyStyle() {
-        auto ps = m_ps;
         m_bg->removeAllChildren();
-        int th = std::clamp((int)getVal("theme", 0), 0, 5);
-        float op = (float)getVal("menuop", 0.8);
+        float op = (float)getVal("menuop", 0.95);
         GLubyte o = (GLubyte)(255.f * op);
-        auto pc = PANELS[std::clamp((int)getVal("panelcol", 0), 0, 5)];
-        auto ac = accentColor();
+        auto ps = m_ps;
 
-        if (th == 5) {
-            auto g = CCLayerGradient::create(ccc4(pc.r, pc.g, pc.b, o),
-                                             ccc4(ac.r / 3, ac.g / 3, ac.b / 3, o));
-            g->setContentSize(ps);
-            m_bg->addChild(g);
-        } else {
-            char const* tex = "square02b_001.png";
-            if (th == 1) tex = "GJ_square01.png";
-            else if (th == 3 || th == 4) tex = "square02_001.png";
-            auto s9 = CCScale9Sprite::create(tex, {0, 0, 80, 80});
-            s9->setContentSize(ps);
-            s9->setPosition(ps / 2);
-            s9->setColor(th == 1 ? ccColor3B{255, 255, 255} : pc);
-            s9->setOpacity(th == 2 ? (GLubyte)(o * 0.5f) : o);
-            m_bg->addChild(s9);
-        }
+        auto p = makeBox(ps.width, ps.height, C_PANEL, o);
+        p->setPosition({ps.width / 2, ps.height / 2});
+        m_bg->addChild(p);
+
+        auto sb = makeBox(m_sbW, ps.height - 16.f, C_SIDE, o);
+        sb->setPosition({8.f + m_sbW / 2, ps.height / 2});
+        m_bg->addChild(sb);
+
+        float bw = ps.width - (8.f + m_sbW + 8.f) - 8.f;
+        auto cb = makeBox(bw, ps.height - 16.f, C_SIDE, o);
+        cb->setPosition({8.f + m_sbW + 8.f + bw / 2, ps.height / 2});
+        m_bg->addChild(cb);
         applyLight();
     }
 
-    // ── content ──
+    // ── small builders ──
+    void deferRefresh() {
+        Loader::get()->queueInMainThread([this]() { this->refresh(); });
+    }
+
+    void addCheck(CCMenu* menu, float x, float y, bool on, int tag, SEL_MenuHandler cb) {
+        auto mk = [](bool state) {
+            auto n = CCNode::create();
+            n->setContentSize({20, 20});
+            auto b = makeBox(20, 20, C_BTN);
+            b->setPosition({10, 10});
+            n->addChild(b);
+            if (state) {
+                auto d = CCDrawNode::create();
+                ccColor4F w {1.f, 1.f, 1.f, 1.f};
+                d->drawSegment({4.f, 10.f}, {8.5f, 5.5f}, 1.4f, w);
+                d->drawSegment({8.5f, 5.5f}, {16.f, 14.5f}, 1.4f, w);
+                n->addChild(d);
+            }
+            return n;
+        };
+        auto t = CCMenuItemToggler::create(mk(false), mk(true), this, cb);
+        t->setTag(tag);
+        t->toggle(on);
+        t->setPosition({x, y});
+        menu->addChild(t);
+    }
+    void addIcon(CCMenu* menu, CCNode* icon, float x, float y, int tag, SEL_MenuHandler cb) {
+        auto b = CCMenuItemSpriteExtra::create(icon, this, cb);
+        b->setTag(tag);
+        b->setPosition({x, y});
+        menu->addChild(b);
+    }
+    CCLabelBMFont* addText(CCNode* parent, std::string const& s, float x, float y, float maxW,
+                           float sc = 0.4f, bool center = false) {
+        auto l = CCLabelBMFont::create(s.c_str(), "bigFont.fnt");
+        l->setScale(sc);
+        l->limitLabelWidth(maxW, sc, 0.12f);
+        l->setAnchorPoint({center ? 0.5f : 0.f, 0.5f});
+        l->setPosition({x, y});
+        parent->addChild(l);
+        return l;
+    }
+
+    CCNode* beginScroll(int rows, CCMenu*& menu, float& H) {
+        H = std::max(m_ch, rows * ROWH + 8.f);
+        auto sl = ScrollLayer::create({m_cw, m_ch});
+        sl->setPosition({m_cx, m_cy});
+        m_content->addChild(sl);
+        auto cl = sl->m_contentLayer;
+        cl->setContentSize({m_cw, H});
+        cl->setPositionY(m_ch - H); // start scrolled to the top
+        menu = CCMenu::create();
+        menu->setPosition({0, 0});
+        cl->addChild(menu, 5);
+        return cl;
+    }
+
+    int countRows(std::vector<Feat> const& fs) {
+        int row = 0, col = 0;
+        for (auto const& f : fs) {
+            if (f.k == Feat::Toggle) { if (++col == 2) { col = 0; row++; } }
+            else { if (col) { row++; col = 0; } row++; }
+        }
+        if (col) row++;
+        return row;
+    }
+
+    // lays out features top-down; tags index m_feats
+    int placeFeats(std::vector<Feat> const& fs, CCNode* cl, CCMenu* menu, float W, float H, int row0) {
+        m_feats = fs;
+        m_valLabels.assign(fs.size(), nullptr);
+        float colW = W / 2.f;
+        int row = row0, col = 0;
+        for (int i = 0; i < (int)fs.size(); i++) {
+            auto const& f = fs[i];
+            bool full = f.k != Feat::Toggle;
+            if (full && col) { row++; col = 0; }
+            float x0 = full ? 0.f : col * colW;
+            float w = full ? W : colW;
+            float y = H - 4.f - ROWH * (row + 0.5f);
+
+            if (f.k == Feat::Button) {
+                auto pill = makePill(f.label.c_str(), W * 0.6f, 22.f, 0.38f, C_BTN, 255);
+                addIcon(menu, pill, W / 2, y, i, menu_selector(ModMenu::onButton));
+            } else if (f.k == Feat::Note) {
+                addText(cl, f.label, W / 2, y, W - 20.f, 0.38f, true)->setColor({150, 155, 185});
+            } else {
+                float lx = x0 + 8.f;
+                bool hasToggle = f.k == Feat::Toggle || f.k == Feat::Input ||
+                                 (f.k == Feat::Stepper && !f.key.empty());
+                if (hasToggle) {
+                    addCheck(menu, x0 + 16.f, y, optd(f.key.c_str(), f.def), i, menu_selector(ModMenu::onToggle));
+                    lx = x0 + 34.f;
+                }
+                if (f.k == Feat::Toggle) {
+                    float right = x0 + w - 4.f;
+                    if (!f.gear.empty()) {
+                        addIcon(menu, iconGear(), right - 11.f, y, i, menu_selector(ModMenu::onGear));
+                        right -= 26.f;
+                    }
+                    addIcon(menu, iconInfo(), right - 8.f, y, i, menu_selector(ModMenu::onInfo));
+                    addText(cl, f.label, lx, y, right - 18.f - lx);
+                } else if (f.k == Feat::Input) {
+                    addText(cl, f.label, lx, y, W * 0.6f - lx);
+                    float bw = W * 0.30f;
+                    auto ti = TextInput::create(bw / 0.75f, "0", "bigFont.fnt");
+                    ti->setScale(0.75f);
+                    ti->setPosition({W * 0.80f, y});
+                    ti->setCommonFilter(CommonFilter::Float);
+                    ti->setString(fmt::format("{}", getVal(f.valKey.c_str(), f.vdef)));
+                    std::string vk = f.valKey;
+                    ti->setCallback([vk](std::string const& s) {
+                        if (s.empty()) return;
+                        setVal(vk.c_str(), std::strtod(s.c_str(), nullptr));
+                    });
+                    cl->addChild(ti, 3);
+                } else if (f.k == Feat::Stepper) {
+                    addText(cl, f.label, lx, y, W - 112.f - lx);
+                    auto mk = [&](char const* str, SEL_MenuHandler cb, float x) {
+                        auto lab = CCLabelBMFont::create(str, "goldFont.fnt");
+                        lab->setScale(0.8f);
+                        addIcon(menu, lab, x, y, i, cb);
+                    };
+                    mk("-", menu_selector(ModMenu::onMinus), W - 106.f);
+                    mk("+", menu_selector(ModMenu::onPlus), W - 18.f);
+                    auto vl = addText(cl, fmtVal(f, getVal(f.valKey.c_str(), f.vdef)), W - 62.f, y, 62.f, 0.36f, true);
+                    m_valLabels[i] = vl;
+                }
+            }
+            if (full) row++;
+            else if (++col == 2) { col = 0; row++; }
+        }
+        if (col) row++;
+        return row;
+    }
+
+    // ── pages ──
     void refresh() {
         recolorTabs();
         m_content->removeAllChildren();
         m_valLabels.clear();
+        m_feats.clear();
 
-        auto menu = CCMenu::create();
-        menu->setPosition({0, 0});
-        m_content->addChild(menu);
-
-        auto const& rows = tabs()[m_tab].rows;
-        float colW = 212.f, x0 = 108.f;
-        for (int i = 0; i < (int)rows.size(); i++) {
-            auto const& r = rows[i];
-            float cx = x0 + (i / 8) * colW;
-            float y = m_ps.height - 54.f - (i % 8) * 28.f;
-            m_valLabels.push_back(nullptr);
-
-            if (r.button) {
-                auto pill = makePill(r.label, 150.f, 24.f, 0.4f, {70, 70, 85}, 255);
-                auto b = CCMenuItemSpriteExtra::create(pill, this, menu_selector(ModMenu::onButton));
-                b->setTag(i);
-                b->setPosition({cx + 85.f, y});
-                menu->addChild(b);
-                continue;
-            }
-
-            float lx = cx + 4.f;
-            if (!r.plain) {
-                auto t = CCMenuItemToggler::createWithStandardSprites(
-                    this, menu_selector(ModMenu::onToggle), 0.55f);
-                t->setTag(i);
-                t->toggle(optd(r.key, r.def));
-                t->setPosition({cx + 12.f, y});
-                menu->addChild(t);
-                lx = cx + 30.f;
-            }
-
-            auto l = CCLabelBMFont::create(r.label, "bigFont.fnt");
-            l->setScale(r.valKey ? 0.3f : 0.38f);
-            l->setAnchorPoint({0.f, 0.5f});
-            l->setPosition({lx, y});
-            m_content->addChild(l);
-
-            if (r.valKey) {
-                auto mk = [&](char const* str, SEL_MenuHandler cb, float x) {
-                    auto lab = CCLabelBMFont::create(str, "goldFont.fnt");
-                    lab->setScale(0.8f);
-                    auto b = CCMenuItemSpriteExtra::create(lab, this, cb);
-                    b->setTag(i);
-                    b->setPosition({x, y});
-                    menu->addChild(b);
-                };
-                mk("-", menu_selector(ModMenu::onMinus), cx + 120.f);
-                mk("+", menu_selector(ModMenu::onPlus), cx + 198.f);
-                auto vl = CCLabelBMFont::create(fmtVal(r, getVal(r.valKey, r.vdef)).c_str(), "bigFont.fnt");
-                vl->setScale(0.34f);
-                vl->setPosition({cx + 159.f, y});
-                m_content->addChild(vl);
-                m_valLabels.back() = vl;
-            }
+        if (!m_sub.empty()) buildSub();
+        else if (m_tab == LABELS_TAB) buildLabels();
+        else {
+            auto const& fs = tabs()[m_tab].feats;
+            CCMenu* menu; float H;
+            auto cl = beginScroll(countRows(fs), menu, H);
+            placeFeats(fs, cl, menu, m_cw, H, 0);
         }
     }
 
+    void buildSub() {
+        auto const& fs = subPage(m_sub);
+        CCMenu* menu; float H;
+        auto cl = beginScroll(countRows(fs) + 1, menu, H);
+        float y = H - 4.f - ROWH * 0.5f;
+        auto back = makePill("< Back", 70.f, 22.f, 0.38f, C_BTN, 255);
+        addIcon(menu, back, 40.f, y, 0, menu_selector(ModMenu::onBack));
+        addText(cl, m_subTitle, 86.f, y, m_cw - 96.f, 0.42f)->setColor(accentColor());
+        placeFeats(fs, cl, menu, m_cw, H, 1);
+    }
+
+    void buildLabels() {
+        std::vector<Feat> top = {
+            Tg("Show Labels", "Master switch for all labels.", "", true),
+            Tg("Show in Editor", "Show labels while in the editor."),
+            Tg("Cheat Indicator", "A dot in the corner turns red once cheats were used.", "cheat"),
+        };
+        auto& order = lblOrder();
+        int rows = 2 + 2 + 1 + (int)order.size();
+        CCMenu* menu; float H;
+        auto cl = beginScroll(rows, menu, H);
+        float W = m_cw;
+        placeFeats(top, cl, menu, W, H, 0);
+        auto Y = [&](int r) { return H - 4.f - ROWH * (r + 0.5f); };
+
+        addIcon(menu, makePill("Import Label", W * 0.88f, 23.f, 0.4f, C_BTN, 255), W / 2, Y(2), 0,
+                menu_selector(ModMenu::onImport));
+        addIcon(menu, makePill("Add New Label", W * 0.88f, 23.f, 0.4f, C_BTN, 255), W / 2, Y(3), 0,
+                menu_selector(ModMenu::onAddLabel));
+
+        addText(cl, "Presets", 8.f, Y(4), W * 0.4f, 0.42f);
+        m_preset = std::clamp(m_preset, 0, (int)LBLS.size() - 1);
+        auto dd = makePill(LBLS[m_preset].name, W * 0.40f, 22.f, 0.4f, C_INPUT, 255);
+        {
+            auto d = CCDrawNode::create();
+            CCPoint t[3] = {{W * 0.40f - 18.f, 14.f}, {W * 0.40f - 8.f, 14.f}, {W * 0.40f - 13.f, 7.f}};
+            d->drawPolygon(t, 3, {1.f, 1.f, 1.f, 1.f}, 0.f, {0, 0, 0, 0});
+            dd->addChild(d);
+        }
+        addIcon(menu, dd, W * 0.77f, Y(4), 0, menu_selector(ModMenu::onPreset));
+
+        for (int i = 0; i < (int)order.size(); i++) {
+            float y = Y(5 + i);
+            std::string id = order[i];
+            addCheck(menu, 16.f, y, opt(("lbl_" + id).c_str()), i, menu_selector(ModMenu::onLblToggle));
+            auto box = makeBox(W * 0.35f, 22.f, C_INPUT);
+            box->setPosition({W * 0.09f + W * 0.175f, y});
+            cl->addChild(box);
+            addText(cl, lblName(id), W * 0.265f, y, W * 0.32f, 0.36f, true);
+            addIcon(menu, iconArrow(false), W * 0.50f, y, i, menu_selector(ModMenu::onLblDown));
+            addIcon(menu, iconArrow(true), W * 0.58f, y, i, menu_selector(ModMenu::onLblUp));
+            addIcon(menu, iconGear(), W * 0.84f, y, i, menu_selector(ModMenu::onLblGear));
+            addIcon(menu, iconTrash(), W * 0.94f, y, i, menu_selector(ModMenu::onLblDel));
+        }
+    }
+
+    // ── callbacks ──
     void onTab(CCObject* s) {
         m_tab = static_cast<CCNode*>(s)->getTag();
-        refresh();
+        m_sub.clear();
+        deferRefresh();
     }
+    void onBack(CCObject*) { m_sub.clear(); deferRefresh(); }
 
     void onToggle(CCObject* s) {
         auto t = static_cast<CCMenuItemToggler*>(s);
-        auto const& r = tabs()[m_tab].rows[t->getTag()];
+        int i = t->getTag();
+        if (i < 0 || i >= (int)m_feats.size()) return;
+        auto const& f = m_feats[i];
         bool on = !t->isToggled(); // callback fires before the visual flips
-        setOpt(r.key, on);
-        if (std::string(r.key) == "autoldm")
-            GameManager::get()->setGameVariable("0042", on);
-        if (opt("notify"))
-            Notification::create(fmt::format("{}: {}", r.label, on ? "ON" : "OFF"),
+        setOpt(f.key.c_str(), on);
+        if (f.key == "autoldm") GameManager::get()->setGameVariable("0042", on);
+        if (on && m_sub.empty() && !isImpl(f.key)) {
+            Notification::create(f.label + ": not implemented yet", NotificationIcon::Warning, 1.5f)->show();
+        } else if (opt("togglenotifications")) {
+            Notification::create(fmt::format("{}: {}", f.label, on ? "ON" : "OFF"),
                                  NotificationIcon::None, 0.8f)->show();
+        }
+    }
+
+    void onInfo(CCObject* s) {
+        int i = static_cast<CCNode*>(s)->getTag();
+        if (i < 0 || i >= (int)m_feats.size()) return;
+        auto const& f = m_feats[i];
+        Notification::create(f.label + ": " + (f.info.empty() ? std::string("No description yet.") : f.info),
+                             NotificationIcon::Info, 2.5f)->show();
+    }
+
+    void onGear(CCObject* s) {
+        int i = static_cast<CCNode*>(s)->getTag();
+        if (i < 0 || i >= (int)m_feats.size()) return;
+        m_sub = m_feats[i].gear;
+        m_subTitle = m_feats[i].label;
+        deferRefresh();
     }
 
     void step(CCObject* s, int dir) {
         int i = static_cast<CCNode*>(s)->getTag();
-        auto const& r = tabs()[m_tab].rows[i];
-        double v = getVal(r.valKey, r.vdef) + dir * r.step;
-        v = std::clamp(v, (double)r.vmin, (double)r.vmax);
+        if (i < 0 || i >= (int)m_feats.size()) return;
+        auto const& r = m_feats[i];
+        double v = getVal(r.valKey.c_str(), r.vdef) + dir * r.step;
+        v = std::clamp(v, r.vmin, r.vmax);
         v = std::round(v * 10.0) / 10.0;
-        setVal(r.valKey, v);
+        setVal(r.valKey.c_str(), v);
         if (i < (int)m_valLabels.size() && m_valLabels[i])
             m_valLabels[i]->setString(fmtVal(r, v).c_str());
-        applyStyle(); // harmless for non-style rows, live for style rows
+        applyStyle();
     }
     void onMinus(CCObject* s) { step(s, -1); }
     void onPlus(CCObject* s) { step(s, +1); }
 
     void onButton(CCObject* s) {
-        auto const& r = tabs()[m_tab].rows[static_cast<CCNode*>(s)->getTag()];
-        std::string k = r.key;
+        int i = static_cast<CCNode*>(s)->getTag();
+        if (i < 0 || i >= (int)m_feats.size()) return;
+        std::string k = m_feats[i].key;
         if (k == "resetdot") {
             if (m_dot) m_dot->resetPos(true);
+        } else if (k.rfind("sc_", 0) == 0) {
+            auto pl = PlayLayer::get();
+            if (k == "sc_hitbox") {
+                setOpt("showhitboxes", !opt("showhitboxes"));
+                Notification::create(fmt::format("Hitboxes: {}", opt("showhitboxes") ? "ON" : "OFF"),
+                                     NotificationIcon::None, 0.8f)->show();
+            } else if (k == "sc_noclip") {
+                setOpt("noclip", !opt("noclip"));
+                Notification::create(fmt::format("Noclip: {}", opt("noclip") ? "ON" : "OFF"),
+                                     NotificationIcon::None, 0.8f)->show();
+            } else if (!pl) {
+                Notification::create("Only works inside a level", NotificationIcon::Warning, 1.2f)->show();
+            } else if (k == "sc_restart") {
+                pl->resetLevel();
+            } else if (k == "sc_full") {
+                pl->resetLevelFromStart();
+            } else if (k == "sc_practice") {
+                pl->togglePracticeMode(!pl->m_isPracticeMode);
+            }
         } else if (k == "resetstyle") {
-            setVal("theme", 0); setVal("accent", 0); setVal("panelcol", 0);
-            setVal("menuop", 0.8); setVal("dotsize", 18); setVal("dotop", 0.6);
+            setVal("accent", 0); setVal("menuop", 0.95); setVal("dotsize", 18); setVal("dotop", 0.6);
             applyStyle();
-            Loader::get()->queueInMainThread([this]() { this->refresh(); });
+            deferRefresh();
         }
+    }
+
+    // labels page
+    void onLblToggle(CCObject* s) {
+        auto t = static_cast<CCMenuItemToggler*>(s);
+        auto& o = lblOrder();
+        int i = t->getTag();
+        if (i < 0 || i >= (int)o.size()) return;
+        setOpt(("lbl_" + o[i]).c_str(), !t->isToggled());
+    }
+    void onLblUp(CCObject* s) {
+        auto& o = lblOrder();
+        int i = static_cast<CCNode*>(s)->getTag();
+        if (i > 0 && i < (int)o.size()) { std::swap(o[i], o[i - 1]); saveOrder(); deferRefresh(); }
+    }
+    void onLblDown(CCObject* s) {
+        auto& o = lblOrder();
+        int i = static_cast<CCNode*>(s)->getTag();
+        if (i >= 0 && i + 1 < (int)o.size()) { std::swap(o[i], o[i + 1]); saveOrder(); deferRefresh(); }
+    }
+    void onLblDel(CCObject* s) {
+        auto& o = lblOrder();
+        int i = static_cast<CCNode*>(s)->getTag();
+        if (i >= 0 && i < (int)o.size()) { o.erase(o.begin() + i); saveOrder(); deferRefresh(); }
+    }
+    void onLblGear(CCObject* s) {
+        auto& o = lblOrder();
+        int i = static_cast<CCNode*>(s)->getTag();
+        if (i < 0 || i >= (int)o.size()) return;
+        m_sub = "labelstyle";
+        m_subTitle = lblName(o[i]);
+        deferRefresh();
+    }
+    void onPreset(CCObject*) {
+        m_preset = (m_preset + 1) % (int)LBLS.size();
+        deferRefresh();
+    }
+    void onAddLabel(CCObject*) {
+        auto& o = lblOrder();
+        std::string id = LBLS[std::clamp(m_preset, 0, (int)LBLS.size() - 1)].id;
+        if (std::find(o.begin(), o.end(), id) != o.end()) {
+            Notification::create("That label is already in the list", NotificationIcon::Warning, 1.2f)->show();
+            return;
+        }
+        o.push_back(id);
+        saveOrder();
+        deferRefresh();
+    }
+    void onImport(CCObject*) {
+        Notification::create("Label import isn't supported yet", NotificationIcon::Warning, 1.5f)->show();
     }
 
     void update(float dt) override {
@@ -523,7 +1003,7 @@ public:
         bool inLevel = PlayLayer::get() != nullptr;
 
         float want = 1.f;
-        if (inLevel && opt("speedhack")) want = (float)getVal("speed", 1.0);
+        if (inLevel && opt("speedhack")) want = (float)std::max(0.01, getVal("speed", 1.0));
         if (sched->getTimeScale() != want) sched->setTimeScale(want);
 
         float scale = sched->getTimeScale();
@@ -531,17 +1011,29 @@ public:
         s_fps = m_fps;
 
         s_hue += dt * 0.2f;
-        if ((int)getVal("accent", 0) >= 9) applyLight(); // rainbow
+        if ((int)getVal("accent", 0) >= 10) applyLight(); // rainbow
     }
+
+    void hidePanel() { if (!m_open) m_panel->setVisible(false); }
 
     void toggle() {
         m_open = !m_open;
-        auto win = CCDirector::get()->getWinSize();
-        float y = m_open ? win.height - 6.f : win.height + m_ps.height + 20.f;
         m_panel->stopAllActions();
-        auto mv = CCMoveTo::create(0.3f, {win.width / 2, y});
-        m_panel->runAction(m_open ? static_cast<CCActionInterval*>(CCEaseBackOut::create(mv))
-                                  : static_cast<CCActionInterval*>(CCEaseIn::create(mv, 2.f)));
+        auto td = CCTouchDispatcher::get();
+        if (m_open) {
+            m_panel->setVisible(true);
+            td->removeDelegate(this);
+            td->addTargetedDelegate(this, -90, true);
+            auto sc = CCScaleTo::create(0.25f, 1.f);
+            m_panel->runAction(CCEaseBackOut::create(sc));
+        } else {
+            td->removeDelegate(this);
+            auto sc = CCScaleTo::create(0.18f, 0.01f);
+            m_panel->runAction(CCSequence::create(
+                CCEaseIn::create(sc, 2.f),
+                CCCallFunc::create(this, callfunc_selector(ModMenu::hidePanel)),
+                nullptr));
+        }
     }
 };
 
@@ -573,15 +1065,36 @@ class $modify(CCKeyboardDispatcher) {
 // ───────────────────────── small hooks ─────────────────────────
 class $modify(GJBaseGameLayer) {
     void handleButton(bool down, int button, bool isPlayer1) {
-        if (down) s_clicks.push_back(nowSec());
+        if (down) { s_clicks.push_back(nowSec()); s_attemptClicks++; }
         GJBaseGameLayer::handleButton(down, button, isPlayer1);
     }
 };
+
+static bool ncBase(PlayLayer* pl, PlayerObject* p) {
+    bool on = opt("noclip") || (opt("noclip_p1") && p == pl->m_player1) ||
+              (opt("noclip_p2") && p == pl->m_player2);
+    if (!on) return false;
+    if (opt("nc_practice") && !pl->m_isPracticeMode) return false;
+    float pct = pl->getCurrentPercent();
+    if (opt("nc_after") && pct < getVal("ncafter", 0.0)) return false;
+    if (opt("nc_until") && pct > getVal("ncuntil", 100.0)) return false;
+    return true;
+}
 
 class $modify(PlayerObject) {
     void playDeathEffect() {
         if (opt("nodeatheffect")) return;
         PlayerObject::playDeathEffect();
+    }
+    // Fallback: some solid-block deaths don't go through the PlayLayer::destroyPlayer hook,
+    // so block the death itself here when noclip applies.
+    void playerDestroyed(bool b) {
+        auto pl = PlayLayer::get();
+        if (pl && !s_forceKill && !opt("nc_hazonly") && ncBase(pl, this)) {
+            s_extBlock = true;
+            return;
+        }
+        PlayerObject::playerDestroyed(b);
     }
 };
 
@@ -601,32 +1114,29 @@ class $modify(HMPlayLayer, PlayLayer) {
     struct Fields {
         CCDrawNode* trailNode = nullptr;
         CCDrawNode* hitNode = nullptr;
+        CCDrawNode* cheatDot = nullptr;
         std::deque<std::vector<CCRect>> hist;
-        std::vector<std::pair<char const*, CCLabelBMFont*>> labels;
+        std::map<std::string, CCLabelBMFont*> labels;
         CCLayerColor* flash = nullptr;
         bool cheated = false;
         bool blockedThisFrame = false;
         bool prevBlocked = false;
+        bool frozenHb = false;
         int totalFrames = 0;
         int blockedFrames = 0;
         int ncDeaths = 0;
         int attempts = 1;
         float levelTime = 0.f;
         float best = 0.f;
+        float runFrom = 0.f;
     };
 
     bool isSafe() {
-        return opt("safemode") || (optd("autosafe", true) && m_fields->cheated);
+        return opt("safemode") || (optd("autosafemode", true) && m_fields->cheated);
     }
 
     bool ncActive(PlayerObject* p, GameObject* obj) {
-        bool on = opt("noclip") || (opt("noclip_p1") && p == m_player1) ||
-                  (opt("noclip_p2") && p == m_player2);
-        if (!on) return false;
-        if (opt("nc_practice") && !m_isPracticeMode) return false;
-        float pct = this->getCurrentPercent();
-        if (opt("nc_after") && pct < getVal("ncafter", 0.0)) return false;
-        if (opt("nc_until") && pct > getVal("ncuntil", 100.0)) return false;
+        if (!ncBase(this, p)) return false;
         if (obj) {
             bool haz = obj->m_objectType == GameObjectType::Hazard;
             if (opt("nc_hazonly") && !haz) return false;
@@ -641,23 +1151,69 @@ class $modify(HMPlayLayer, PlayLayer) {
             return;
         }
         PlayLayer::destroyPlayer(p, obj);
+        if (opt("hitboxesondeath") && !opt("showhitboxes")) {
+            auto f = m_fields.self();
+            ensureNodes();
+            f->hitNode->clear();
+            drawHitboxes(false);
+            f->frozenHb = true; // keep the snapshot on screen until the next attempt
+        }
+    }
+
+    void ensureNodes() {
+        auto f = m_fields.self();
+        if (!f->trailNode) {
+            f->trailNode = CCDrawNode::create();
+            m_objectLayer->addChild(f->trailNode, 1000);
+            f->hitNode = CCDrawNode::create();
+            m_objectLayer->addChild(f->hitNode, 1001);
+        }
+    }
+
+    void drawHitboxes(bool blocked) {
+        auto f = m_fields.self();
+        if (!m_player1) return;
+        float thick = (float)getVal("hbthick", 1.0);
+        bool fill = opt("fill");
+        auto hz = f4(colIdx("hazcol", 2), 1.f);
+        auto so = f4(colIdx("solidcol", 7), 1.f);
+        auto pl = (opt("nc_redhit") && blocked) ? ccColor4F{1.f, 0.f, 0.f, 1.f}
+                                                : f4(colIdx("plrcol", 4), 1.f);
+        float px = m_player1->getPositionX();
+        for (auto obj : CCArrayExt<GameObject*>(m_objects)) {
+            if (!obj) continue;
+            float dx = obj->getPositionX() - px;
+            if (dx < -250.f || dx > 450.f) continue;
+            ccColor4F col;
+            if (obj->m_objectType == GameObjectType::Hazard) col = hz;
+            else if (obj->m_objectType == GameObjectType::Solid) col = so;
+            else continue;
+            drawRect(f->hitNode, obj->getObjectRect(), col, fill, thick);
+        }
+        drawRect(f->hitNode, m_player1->getObjectRect(), pl, fill, thick);
+        if (m_gameState.m_isDualMode && m_player2)
+            drawRect(f->hitNode, m_player2->getObjectRect(), pl, fill, thick);
     }
 
     void setupHasCompleted() {
         PlayLayer::setupHasCompleted();
-        if (opt("autopractice") && !m_isPracticeMode) this->togglePracticeMode(true);
+        if (opt("autopracticemode") && !m_isPracticeMode) this->togglePracticeMode(true);
     }
 
     void resetLevel() {
         auto f = m_fields.self();
         f->hist.clear();
-        f->attempts++;
+        f->frozenHb = false;
+        if (f->hitNode) f->hitNode->clear();
+        s_attemptClicks = 0;
+        if (!opt("freezeattempts")) f->attempts++;
         f->levelTime = 0.f;
         f->totalFrames = 0;
         f->blockedFrames = 0;
         f->ncDeaths = 0;
         f->prevBlocked = false;
         PlayLayer::resetLevel();
+        f->runFrom = this->getCurrentPercent();
     }
 
     // Safe mode: completions/progress are not saved once cheats were used
@@ -675,13 +1231,16 @@ class $modify(HMPlayLayer, PlayLayer) {
         auto w = CCDirector::get()->getWinSize();
         f->flash = CCLayerColor::create({255, 0, 0, 0}, w.width, w.height);
         m_uiLayer->addChild(f->flash, 40);
-        for (auto k : {"lbl_fps", "lbl_pct", "lbl_attempt", "lbl_time", "lbl_best",
-                       "lbl_clock", "lbl_cps", "lbl_nca", "lbl_ncd", "lbl_test"}) {
+        for (auto const& d : LBLS) {
             auto l = CCLabelBMFont::create("", "bigFont.fnt");
             l->setAnchorPoint({0.f, 1.f});
+            l->setVisible(false);
             m_uiLayer->addChild(l, 50);
-            f->labels.push_back({k, l});
+            f->labels[d.id] = l;
         }
+        f->cheatDot = CCDrawNode::create();
+        f->cheatDot->setPosition({w.width - 14.f, w.height - 14.f});
+        m_uiLayer->addChild(f->cheatDot, 50);
     }
 
     float accuracy() {
@@ -707,34 +1266,52 @@ class $modify(HMPlayLayer, PlayLayer) {
             f->flash->setOpacity((GLubyte)o);
         }
 
-        float sc = 0.32f * (opt("lbl_size") ? (float)getVal("lblscale", 1.0) : 1.f);
-        bool master = optd("lbl_master", true);
+        bool master = optd("showlabels", true);
+
+        // cheat indicator
+        if (f->cheatDot) {
+            f->cheatDot->clear();
+            if (master && opt("cheatindicator")) {
+                ccColor4F c = f->cheated ? ccColor4F{1.f, 0.2f, 0.2f, 0.9f} : ccColor4F{0.3f, 1.f, 0.4f, 0.9f};
+                f->cheatDot->drawDot({0, 0}, 5.f, c);
+            }
+        }
+
+        float sc = 0.32f * (float)getVal("lblscale", 1.0);
         auto lc = colIdx("lblcol", 8);
         GLubyte lo = (GLubyte)(255.0 * getVal("lblop", 0.8));
         float y = win.height - 6.f;
-        for (auto& [key, lab] : f->labels) {
-            std::string k = key;
-            bool show = master && opt(key);
+
+        for (auto& kv : f->labels) kv.second->setVisible(false);
+
+        for (auto const& id : lblOrder()) {
+            auto it = f->labels.find(id);
+            if (it == f->labels.end()) continue;
+            auto lab = it->second;
+            bool show = master && opt(("lbl_" + id).c_str());
             std::string txt;
-            if (k == "lbl_fps") txt = fmt::format("FPS: {}", (int)(s_fps + 0.5f));
-            else if (k == "lbl_pct")
-                txt = opt("lbl_acc") ? fmt::format("{:.2f}%", pct) : fmt::format("{}%", (int)pct);
-            else if (k == "lbl_attempt") txt = fmt::format("Attempt {}", f->attempts);
-            else if (k == "lbl_time") {
+            if (id == "fps") txt = fmt::format("FPS: {}", (int)(s_fps + 0.5f));
+            else if (id == "pct")
+                txt = opt("accuratepercentage") ? fmt::format("{:.2f}%", pct) : fmt::format("{}%", (int)pct);
+            else if (id == "attempt") txt = fmt::format("Attempt {}", f->attempts);
+            else if (id == "time") {
                 int m = (int)(f->levelTime / 60.f);
                 txt = fmt::format("{}:{:05.2f}", m, f->levelTime - m * 60.f);
             }
-            else if (k == "lbl_best") txt = fmt::format("Best: {:.1f}%", f->best);
-            else if (k == "lbl_clock") {
+            else if (id == "best") txt = fmt::format("Best: {:.1f}%", f->best);
+            else if (id == "runfrom") txt = fmt::format("Run From: {:.0f}%", f->runFrom);
+            else if (id == "clock") {
                 std::time_t t = std::time(nullptr);
                 char buf[16];
                 std::strftime(buf, sizeof(buf), "%H:%M:%S", std::localtime(&t));
                 txt = buf;
             }
-            else if (k == "lbl_cps") txt = fmt::format("CPS: {}", s_clicks.size());
-            else if (k == "lbl_nca") txt = fmt::format("Noclip Accuracy: {:.2f}%", accuracy());
-            else if (k == "lbl_ncd") txt = fmt::format("Noclip Deaths: {}", f->ncDeaths);
-            else if (k == "lbl_test") {
+            else if (id == "cps") txt = fmt::format("CPS: {}", s_clicks.size());
+            else if (id == "nca") txt = fmt::format("Noclip Accuracy: {:.2f}%", accuracy());
+            else if (id == "ncd") txt = fmt::format("Noclip Deaths: {}", f->ncDeaths);
+            else if (id == "jumps") txt = fmt::format("Jumps: {}", s_attemptClicks);
+            else if (id == "level") txt = m_level ? std::string(m_level->m_levelName) : std::string("Level");
+            else if (id == "testmode") {
                 if (isSafe()) txt = "Safe Mode";
                 else if (m_isTestMode) txt = "Testmode";
                 else show = false;
@@ -754,15 +1331,11 @@ class $modify(HMPlayLayer, PlayLayer) {
         PlayLayer::postUpdate(dt);
         auto f = m_fields.self();
 
-        if (!f->trailNode) {
-            f->trailNode = CCDrawNode::create();
-            m_objectLayer->addChild(f->trailNode, 1000);
-            f->hitNode = CCDrawNode::create();
-            m_objectLayer->addChild(f->hitNode, 1001);
-        }
+        ensureNodes();
 
         // read the flag BEFORE resetting it (used by flash / hitbox colour)
-        bool blocked = f->blockedThisFrame;
+        bool blocked = f->blockedThisFrame || s_extBlock;
+        s_extBlock = false;
 
         if (opt("noclip") || opt("noclip_p1") || opt("noclip_p2") || opt("jumphack") ||
             (opt("speedhack") && std::fabs(getVal("speed", 1.0) - 1.0) > 0.001))
@@ -780,7 +1353,11 @@ class $modify(HMPlayLayer, PlayLayer) {
         if (m_player1 && !m_player1->m_isDead) {
             if ((opt("nclimit") && f->totalFrames > 60 && accuracy() < getVal("nclimitv", 95.0)) ||
                 (opt("ncdlimit") && f->ncDeaths >= (int)getVal("ncdlimitv", 10.0)))
+            {
+                s_forceKill = true;
                 PlayLayer::destroyPlayer(m_player1, m_anticheatSpike);
+                s_forceKill = false;
+            }
         }
 
         if (m_player1 && !m_player1->m_isDead) f->levelTime += dt;
@@ -800,29 +1377,17 @@ class $modify(HMPlayLayer, PlayLayer) {
 
         float thick = (float)getVal("hbthick", 1.0);
 
+        // no trail
+        if (opt("notrail")) {
+            if (m_player1 && m_player1->m_regularTrail) m_player1->m_regularTrail->setVisible(false);
+            if (m_player2 && m_player2->m_regularTrail) m_player2->m_regularTrail->setVisible(false);
+        }
+
         // ── hitboxes (drawn manually) ──
-        f->hitNode->clear();
-        bool showHb = opt("hitbox") || (opt("hitdeath") && m_player1 && m_player1->m_isDead);
-        if (showHb && m_player1) {
-            bool fill = opt("fill");
-            auto hz = f4(colIdx("hazcol", 2), 1.f);
-            auto so = f4(colIdx("solidcol", 7), 1.f);
-            auto pl = (opt("nc_redhit") && blocked) ? ccColor4F{1.f, 0.f, 0.f, 1.f}
-                                                    : f4(colIdx("plrcol", 4), 1.f);
-            float px = m_player1->getPositionX();
-            for (auto obj : CCArrayExt<GameObject*>(m_objects)) {
-                if (!obj) continue;
-                float dx = obj->getPositionX() - px;
-                if (dx < -250.f || dx > 450.f) continue;
-                ccColor4F col;
-                if (obj->m_objectType == GameObjectType::Hazard) col = hz;
-                else if (obj->m_objectType == GameObjectType::Solid) col = so;
-                else continue;
-                drawRect(f->hitNode, obj->getObjectRect(), col, fill, thick);
-            }
-            drawRect(f->hitNode, m_player1->getObjectRect(), pl, fill, thick);
-            if (m_gameState.m_isDualMode && m_player2)
-                drawRect(f->hitNode, m_player2->getObjectRect(), pl, fill, thick);
+        if (!f->frozenHb) {
+            f->hitNode->clear();
+            if (opt("showhitboxes") || (opt("hitboxesondeath") && m_player1 && m_player1->m_isDead))
+                drawHitboxes(blocked);
         }
 
         // ── trail ──
