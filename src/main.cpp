@@ -440,8 +440,8 @@ static CCNode* iconArrow(bool up) {
     n->setContentSize({22, 22});
     auto d = CCDrawNode::create();
     CCPoint t[3];
-    if (up) { t[0] = {3.f, 5.f}; t[1] = {19.f, 5.f}; t[2] = {11.f, 17.f}; }
-    else    { t[0] = {3.f, 17.f}; t[1] = {19.f, 17.f}; t[2] = {11.f, 5.f}; }
+    if (up) { t[0] = CCPoint(3.f, 5.f); t[1] = CCPoint(19.f, 5.f); t[2] = CCPoint(11.f, 17.f); }
+    else    { t[0] = CCPoint(3.f, 17.f); t[1] = CCPoint(19.f, 17.f); t[2] = CCPoint(11.f, 5.f); }
     d->drawPolygon(t, 3, {0.88f, 0.9f, 1.f, 1.f}, 0.f, {0, 0, 0, 0});
     n->addChild(d);
     return n;
@@ -554,7 +554,7 @@ public:
     bool init() override {
         if (!CCNode::init()) return false;
         auto win = CCDirector::get()->getWinSize();
-        m_ps = {std::floor(win.width * 0.67f), std::floor(win.height * 0.86f)};
+        m_ps = CCSize(std::floor(win.width * 0.67f), std::floor(win.height * 0.86f));
         auto ps = m_ps;
         m_sbW = std::floor(ps.width * 0.24f);
 
