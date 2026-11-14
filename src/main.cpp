@@ -6,11 +6,11 @@
 #include <Geode/modify/MenuLayer.hpp>
 #include <Geode/modify/CCKeyboardDispatcher.hpp>
 #include <Geode/ui/OverlayManager.hpp>
-#include <Geode/ui/ScrollLayer.hpp>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <ctime>
+#include <functional>
 #include <deque>
 #include <vector>
 
@@ -64,17 +64,24 @@ static std::vector<Tab> const& tabs() {
         {"Level", {
             {"hitbox", "Show Hitboxes"},
             {"hitdeath", "Hitboxes On Death"},
-            {"trail", "Hitbox Trail"},
             {"fill", "Fill Hitboxes"},
+            {"trail", "Hitbox Trail"},
+            {"customtrail", "Trail Length", false, "traillen", 30.f, 600.f, 30.f, 240.f},
+            {"autopractice", "Auto Practice Mode"},
             {"autoldm", "Auto LDM"},
         }},
         {"Player", {
             {"noclip", "Noclip"},
+            {"noclip_p1", "Noclip P1 Only"},
+            {"noclip_p2", "Noclip P2 Only"},
+            {"ncflash", "Noclip Flash"},
             {"jumphack", "Jump Hack"},
             {"nodeatheffect", "No Death Effect"},
             {"hideplayer", "Hide Player"},
         }},
         {"Labels", {
+            {"lbl_master", "Show Labels", true},
+            {"lbl_size", "Label Size", false, "lblscale", 0.5f, 2.f, 0.1f, 1.f},
             {"lbl_fps", "FPS"},
             {"lbl_pct", "Percentage"},
             {"lbl_acc", "Accurate Percentage"},
@@ -91,17 +98,82 @@ static std::vector<Tab> const& tabs() {
     return t;
 }
 
+static std::string fmtVal(Row const& r, double v) {
+    return r.step >= 1.f ? fmt::format("{:.0f}", v) : fmt::format("{:.1f}", v);
+}
+
+// Draggable dot: hold and drag to move, tap to open/close the menu
+class DotNode : public CCNode, public CCTouchDelegate {
+public:
+    std::function<void()> m_onTap;
+    bool m_moved = false;
+    CCPoint m_start, m_off;
+    float m_r = 18.f;
+
+    static DotNode* create(std::function<void()> tap) {
+        auto r = new DotNode();
+        if (r && r->init()) { r->m_onTap = std::move(tap); r->setup(); r->autorelease(); return r; }
+        CC_SAFE_DELETE(r);
+        return nullptr;
+    }
+
+    void setup() {
+        auto d = CCDrawNode::create();
+        d->drawDot({0, 0}, m_r, {0.f, 0.85f, 1.f, 0.45f});
+        d->drawDot({0, 0}, m_r - 2.f, {0.04f, 0.04f, 0.08f, 0.55f});
+        CCPoint sq[4] = {{-8, -8}, {8, -8}, {8, 8}, {-8, 8}};
+        d->drawPolygon(sq, 4, {0, 0, 0, 0}, 1.3f, {1.f, 0.24f, 0.24f, 0.8f});
+        CCPoint in[4] = {{-3.5f, -3.5f}, {3.5f, -3.5f}, {3.5f, 3.5f}, {-3.5f, 3.5f}};
+        d->drawPolygon(in, 4, {0.f, 0.86f, 1.f, 0.8f}, 0.f, {0, 0, 0, 0});
+        this->addChild(d);
+
+        auto win = CCDirector::get()->getWinSize();
+        this->setPosition({(float)getVal("dotx", 30.0), (float)getVal("doty", win.height - 30.0)});
+        CCTouchDispatcher::get()->addTargetedDelegate(this, -600, true);
+    }
+
+    ~DotNode() override { CCTouchDispatcher::get()->removeDelegate(this); }
+
+    bool ccTouchBegan(CCTouch* t, CCEvent*) override {
+        if (!this->getParent() || !this->isVisible()) return false;
+        auto p = this->getParent()->convertTouchToNodeSpace(t);
+        if (ccpDistance(p, this->getPosition()) > m_r + 8.f) return false;
+        m_moved = false;
+        m_start = p;
+        m_off = this->getPosition() - p;
+        return true;
+    }
+    void ccTouchMoved(CCTouch* t, CCEvent*) override {
+        auto p = this->getParent()->convertTouchToNodeSpace(t);
+        if (!m_moved && ccpDistance(p, m_start) > 6.f) m_moved = true;
+        if (m_moved) {
+            auto win = CCDirector::get()->getWinSize();
+            CCPoint np = p + m_off;
+            np.x = std::clamp(np.x, m_r, win.width - m_r);
+            np.y = std::clamp(np.y, m_r, win.height - m_r);
+            this->setPosition(np);
+        }
+    }
+    void ccTouchEnded(CCTouch*, CCEvent*) override {
+        if (m_moved) {
+            setVal("dotx", this->getPositionX());
+            setVal("doty", this->getPositionY());
+        } else if (m_onTap) m_onTap();
+    }
+    void ccTouchCancelled(CCTouch*, CCEvent*) override {}
+};
+
 class ModMenu : public CCNode {
 public:
     static inline ModMenu* s_inst = nullptr;
     CCNode* m_panel = nullptr;
-    ScrollLayer* m_scroll = nullptr;
+    CCNode* m_content = nullptr;
     std::vector<ButtonSprite*> m_tabSprites;
     std::vector<CCLabelBMFont*> m_valLabels;
     int m_tab = 0;
     bool m_open = false;
     float m_fps = 60.f;
-    CCSize m_ps {370.f, 235.f};
+    CCSize m_ps {520.f, 240.f};
 
     static ModMenu* create() {
         auto r = new ModMenu();
@@ -143,29 +215,16 @@ public:
             m_tabSprites.push_back(spr);
             auto item = CCMenuItemSpriteExtra::create(spr, this, menu_selector(ModMenu::onTab));
             item->setTag(i);
-            item->setPosition({54.f, ps.height - 50.f - i * 36.f});
+            item->setPosition({54.f, ps.height - 52.f - i * 38.f});
             tabMenu->addChild(item);
         }
 
+        m_content = CCNode::create();
+        m_panel->addChild(m_content);
         refresh();
 
-        // small transparent dot with logo (top-left)
-        CCNode* dot = CCSprite::create("dot-logo.png"_spr);
-        float d = 36.f;
-        if (dot) {
-            dot->setScale(d / dot->getContentSize().width);
-            static_cast<CCSprite*>(dot)->setOpacity(150);
-        } else {
-            auto dn = CCDrawNode::create();
-            dn->drawDot({d / 2, d / 2}, d / 2, {0.f, 0.85f, 1.f, 0.55f});
-            dn->setContentSize({d, d});
-            dot = dn;
-        }
-        auto btn = CCMenuItemSpriteExtra::create(dot, this, menu_selector(ModMenu::onDot));
-        auto dm = CCMenu::create();
-        dm->addChild(btn);
-        dm->setPosition({30.f, win.height - 30.f});
-        this->addChild(dm, 5);
+        auto dot = DotNode::create([this]() { this->toggle(); });
+        if (dot) this->addChild(dot, 5);
 
         this->scheduleUpdate();
         return true;
@@ -175,61 +234,55 @@ public:
         for (int i = 0; i < (int)m_tabSprites.size(); i++)
             m_tabSprites[i]->updateBGImage(i == m_tab ? "GJ_button_02.png" : "GJ_button_01.png");
 
-        if (m_scroll) { m_scroll->removeFromParent(); m_scroll = nullptr; }
+        m_content->removeAllChildren();
         m_valLabels.clear();
-
-        auto const& rows = tabs()[m_tab].rows;
-        CCSize view {258.f, 190.f};
-        float rowH = 28.f;
-        float H = std::max(view.height, rows.size() * rowH + 8.f);
-
-        m_scroll = ScrollLayer::create(view);
-        m_scroll->setPosition({104.f, 10.f});
-        m_panel->addChild(m_scroll);
-        m_scroll->m_contentLayer->setContentSize({view.width, H});
 
         auto menu = CCMenu::create();
         menu->setPosition({0, 0});
-        menu->setContentSize({view.width, H});
-        m_scroll->m_contentLayer->addChild(menu);
+        m_content->addChild(menu);
 
+        auto const& rows = tabs()[m_tab].rows;
+        float colW = 205.f, x0 = 108.f;
         for (int i = 0; i < (int)rows.size(); i++) {
             auto const& r = rows[i];
-            float y = H - 16.f - i * rowH;
+            float cx = x0 + (i / 7) * colW;
+            float y = m_ps.height - 52.f - (i % 7) * 28.f;
 
             auto t = CCMenuItemToggler::createWithStandardSprites(
                 this, menu_selector(ModMenu::onToggle), 0.55f);
             t->setTag(i);
             t->toggle(optd(r.key, r.def));
-            t->setPosition({16.f, y});
+            t->setPosition({cx + 12.f, y});
             menu->addChild(t);
 
             auto l = CCLabelBMFont::create(r.label, "bigFont.fnt");
-            l->setScale(0.4f);
+            l->setScale(0.38f);
             l->setAnchorPoint({0.f, 0.5f});
-            l->setPosition({34.f, y});
-            m_scroll->m_contentLayer->addChild(l);
+            l->setPosition({cx + 30.f, y});
+            m_content->addChild(l);
 
             CCLabelBMFont* vl = nullptr;
             if (r.valKey) {
-                auto mk = [&](char const* s, SEL_MenuHandler cb, float x) {
-                    auto lab = CCLabelBMFont::create(s, "goldFont.fnt");
+                auto mk = [&](char const* str, SEL_MenuHandler cb, float x) {
+                    auto lab = CCLabelBMFont::create(str, "goldFont.fnt");
                     lab->setScale(0.8f);
                     auto b = CCMenuItemSpriteExtra::create(lab, this, cb);
                     b->setTag(i);
                     b->setPosition({x, y});
                     menu->addChild(b);
                 };
-                mk("-", menu_selector(ModMenu::onMinus), view.width - 74.f);
-                mk("+", menu_selector(ModMenu::onPlus), view.width - 16.f);
-                vl = CCLabelBMFont::create(fmt::format("{:.1f}", getVal(r.valKey, r.vdef)).c_str(), "bigFont.fnt");
-                vl->setScale(0.4f);
-                vl->setPosition({view.width - 45.f, y});
-                m_scroll->m_contentLayer->addChild(vl);
+                // stepper sits on the line below the label so long names fit
+                mk("-", menu_selector(ModMenu::onMinus), cx + 130.f);
+                mk("+", menu_selector(ModMenu::onPlus), cx + 190.f);
+                vl = CCLabelBMFont::create(fmtVal(r, getVal(r.valKey, r.vdef)).c_str(), "bigFont.fnt");
+                vl->setScale(0.38f);
+                vl->setPosition({cx + 160.f, y});
+                m_content->addChild(vl);
+                l->setPosition({cx + 30.f, y + 0.f});
+                l->setScale(0.3f);
             }
             m_valLabels.push_back(vl);
         }
-        m_scroll->moveToTop();
     }
 
     void onTab(CCObject* s) {
@@ -254,12 +307,10 @@ public:
         v = std::round(v * 10.0) / 10.0;
         setVal(r.valKey, v);
         if (i < (int)m_valLabels.size() && m_valLabels[i])
-            m_valLabels[i]->setString(fmt::format("{:.1f}", v).c_str());
+            m_valLabels[i]->setString(fmtVal(r, v).c_str());
     }
     void onMinus(CCObject* s) { step(s, -1); }
     void onPlus(CCObject* s) { step(s, +1); }
-
-    void onDot(CCObject*) { toggle(); }
 
     void update(float dt) override {
         auto sched = CCDirector::get()->getScheduler();
@@ -352,6 +403,7 @@ class $modify(HMPlayLayer, PlayLayer) {
         int attempts = 1;
         float levelTime = 0.f;
         float best = 0.f;
+        CCLayerColor* flash = nullptr;
     };
 
     bool isSafe() {
@@ -359,11 +411,18 @@ class $modify(HMPlayLayer, PlayLayer) {
     }
 
     void destroyPlayer(PlayerObject* p, GameObject* obj) {
-        if (opt("noclip") && obj != m_anticheatSpike) {
+        bool nc = opt("noclip") || (opt("noclip_p1") && p == m_player1) ||
+                  (opt("noclip_p2") && p == m_player2);
+        if (nc && obj != m_anticheatSpike) {
             m_fields->blockedThisFrame = true;
             return;
         }
         PlayLayer::destroyPlayer(p, obj);
+    }
+
+    void setupHasCompleted() {
+        PlayLayer::setupHasCompleted();
+        if (opt("autopractice") && !m_isPracticeMode) this->togglePracticeMode(true);
     }
 
     void resetLevel() {
@@ -385,10 +444,14 @@ class $modify(HMPlayLayer, PlayLayer) {
 
     void makeLabels() {
         auto f = m_fields.self();
+        auto w = CCDirector::get()->getWinSize();
+        f->flash = CCLayerColor::create({255, 0, 0, 0}, w.width, w.height);
+        m_uiLayer->addChild(f->flash, 40);
         for (auto k : {"lbl_fps", "lbl_pct", "lbl_attempt", "lbl_time", "lbl_best",
                        "lbl_clock", "lbl_cps", "lbl_nca", "lbl_ncd", "lbl_test"}) {
             auto l = CCLabelBMFont::create("", "bigFont.fnt");
             l->setScale(0.32f);
+            l->setTag(1);
             l->setAnchorPoint({0.f, 1.f});
             l->setOpacity(200);
             m_uiLayer->addChild(l, 50);
@@ -404,10 +467,20 @@ class $modify(HMPlayLayer, PlayLayer) {
         double now = nowSec();
         while (!s_clicks.empty() && now - s_clicks.front() > 1.0) s_clicks.pop_front();
 
+        if (f->flash) {
+            int o = f->flash->getOpacity();
+            if (opt("ncflash") && f->blockedThisFrame) o = 90;
+            else o = std::max(0, o - 12);
+            f->flash->setOpacity(o);
+        }
+
+        float sc = 0.32f * (opt("lbl_size") ? (float)getVal("lblscale", 1.0) : 1.f);
+        bool master = optd("lbl_master", true);
         float y = win.height - 6.f;
         for (auto& [key, lab] : f->labels) {
             std::string k = key;
-            bool show = opt(key);
+            bool show = master && opt(key);
+            lab->setScale(sc);
             std::string txt;
             if (k == "lbl_fps") txt = fmt::format("FPS: {}", (int)(s_fps + 0.5f));
             else if (k == "lbl_pct")
@@ -440,7 +513,7 @@ class $modify(HMPlayLayer, PlayLayer) {
             if (!show) continue;
             lab->setString(txt.c_str());
             lab->setPosition({62.f, y});
-            y -= 11.f;
+            y -= 35.f * sc;
         }
     }
 
@@ -456,7 +529,7 @@ class $modify(HMPlayLayer, PlayLayer) {
         }
 
         // cheat tracking (for Safe Mode)
-        if (opt("noclip") || opt("jumphack") ||
+        if (opt("noclip") || opt("noclip_p1") || opt("noclip_p2") || opt("jumphack") ||
             (opt("speedhack") && std::fabs(getVal("speed", 1.0) - 1.0) > 0.001))
             f->cheated = true;
 
@@ -514,7 +587,8 @@ class $modify(HMPlayLayer, PlayLayer) {
             std::vector<CCRect> r { m_player1->getObjectRect() };
             if (m_gameState.m_isDualMode && m_player2) r.push_back(m_player2->getObjectRect());
             f->hist.push_back(std::move(r));
-            while (f->hist.size() > TRAIL_LEN) f->hist.pop_front();
+            size_t maxLen = opt("customtrail") ? (size_t)getVal("traillen", 240.0) : TRAIL_LEN;
+            while (f->hist.size() > maxLen) f->hist.pop_front();
         }
 
         size_t n = f->hist.size();
