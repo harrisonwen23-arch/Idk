@@ -4,7 +4,6 @@
 
 using namespace geode::prelude;
 
-// Forward declaration of the Mod Menu Popup
 class ModMenuPopup : public Popup<> {
 protected:
     bool setup() override {
@@ -12,7 +11,7 @@ protected:
         auto winSize = this->m_size;
 
         auto menu = CCMenu::create();
-        menu->setLayout(ColumnLayout::create()->setGap(10.f));
+        menu->setLayout(ColumnLayout::create()->setGap(15.f));
         menu->setPosition({winSize.width / 2, winSize.height / 2 - 10.f});
 
         // 1. Noclip Toggle
@@ -56,7 +55,7 @@ protected:
         menu->addChild(trailToggle);
         menu->updateLayout();
 
-        this->addChild(menu);
+        this->m_mainLayer->addChild(menu);
         return true;
     }
 
@@ -68,9 +67,6 @@ protected:
     void onToggleHitboxes(CCObject* sender) {
         bool val = !Mod::get()->getSettingValue<bool>("hitboxes");
         Mod::get()->setSettingValue<bool>("hitboxes", val);
-        if (auto playLayer = PlayLayer::get()) {
-            playLayer->toggleHitboxes();
-        }
     }
 
     void onToggleTrail(CCObject* sender) {
@@ -81,7 +77,7 @@ protected:
 public:
     static ModMenuPopup* create() {
         auto ret = new ModMenuPopup();
-        if (ret && ret->initAnchored(320, 220)) {
+        if (ret && ret->init(320.f, 220.f)) {
             ret->autorelease();
             return ret;
         }
@@ -90,14 +86,13 @@ public:
     }
 };
 
-// Hook into PlayLayer to add the floating orb and enforce features
 class $modify(MyPlayLayer, PlayLayer) {
     bool init(GJGameLevel* level, bool useReplay, bool dontCreateObjects) {
         if (!PlayLayer::init(level, useReplay, dontCreateObjects)) {
             return false;
         }
 
-        // Create the floating orb button on the game screen
+        // Floating orb button
         auto orbSprite = CCSprite::createWithSpriteFrameName("GJ_nodeBtn_001.png");
         auto orbButton = CCMenuItemSpriteExtra::create(
             orbSprite,
@@ -118,10 +113,9 @@ class $modify(MyPlayLayer, PlayLayer) {
         ModMenuPopup::create()->show();
     }
 
-    // Noclip Hook: Prevent player death if noclip is enabled
     void destroyPlayer(PlayerObject* player, GameObject* object) {
         if (Mod::get()->getSettingValue<bool>("noclip")) {
-            return; // Ignore death!
+            return;
         }
         PlayLayer::destroyPlayer(player, object);
     }
