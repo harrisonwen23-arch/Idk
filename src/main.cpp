@@ -13,6 +13,8 @@
 #include <cmath>
 #include <cstdlib>
 #include <ctime>
+#include <filesystem>
+#include <fstream>
 #include <deque>
 #include <functional>
 #include <map>
@@ -107,7 +109,7 @@ static std::vector<LblDef> const LBLS = {
     {"fps", "FPS"}, {"testmode", "Testmode"}, {"runfrom", "Run From"}, {"attempt", "Attempt"},
     {"pct", "Percentage"}, {"time", "Level Time"}, {"best", "Best Run"}, {"clock", "Clock"},
     {"cps", "CPS"}, {"nca", "Noclip Accuracy"}, {"ncd", "Noclip Deaths"},
-    {"jumps", "Jumps"}, {"level", "Level Name"}
+    {"jumps", "Jumps"}, {"level", "Level Name"}, {"bot", "Bot"}
 };
 static std::string lblName(std::string const& id) {
     for (auto& d : LBLS) if (id == d.id) return d.name;
@@ -163,9 +165,9 @@ static Feat TK(char const* key, std::string label, bool def = false) {
     Feat f; f.k = Feat::Toggle; f.label = label; f.key = key; f.def = def; return f;
 }
 // toggle + number text box
-static Feat Inp(std::string label, char const* valKey, double vdef, std::string info = "") {
+static Feat Inp(std::string label, char const* valKey, double vdef, std::string info = "", std::string gear = "") {
     Feat f; f.k = Feat::Input; f.label = label; f.key = autoKey(label);
-    f.valKey = valKey; f.vdef = vdef; f.info = info; return f;
+    f.valKey = valKey; f.vdef = vdef; f.info = info; f.gear = gear; return f;
 }
 // stepper only
 static Feat Sp(std::string label, char const* valKey, double mn, double mx, double st, double vd,
@@ -188,7 +190,7 @@ static std::vector<Tab> const& tabs() {
     static std::vector<Tab> t = {
         {"Global", {
             Inp("Physics Bypass", "physicsbypass", 240),
-            Inp("Speedhack", "speed", 1, "Changes the game speed while in a level."),
+            Inp("Speedhack", "speed", 1, "Changes the game speed while in a level.", "speedhack"),
             Inp("Pitch Shift", "pitchshift", 1),
             Inp("Audio Speed", "audiospeed", 1),
             Tg("Sync with Speedhack"),
@@ -253,7 +255,7 @@ static std::vector<Tab> const& tabs() {
             Tg("Level Kick"), Tg("Menu Gameplay"),
             Tg("Music Customizer"), Tg("Pause Buffering"),
             Tg("Practice Music Sync"), Tg("Show Spam Comments"),
-            Tg("Swift Click"), Tg("Unlock Icons", "Every icon and colour is unlocked."),
+            Tg("Swift Click"), Tg("Unlock Icons", "Every icon and colour is unlocked.", "unlockicons"),
             Tg("Unlock Main Levels"), Tg("Unlock Paths"),
             Tg("Unlock Shops"), Tg("Unlock Vaults"),
         }},
@@ -261,19 +263,27 @@ static std::vector<Tab> const& tabs() {
             Tg("Always Show Trail"), Tg("AutoClicker", "", "autoclicker"),
             Tg("Auto Kill", "", "autokill"), Tg("Ball Rotation Bug", "", "ballrot"),
             Tg("Custom Wave Trail", "", "cwt"), Tg("Force Ghost Trail"),
-            Tg("Frame Stepper", "", "fstep"), Tg("Hide Player", "Makes the player invisible."),
-            Tg("Jump Hack", "Lets you jump at any time."), Tg("Mute Level Audio on Death"),
-            Tg("Mute Rewards SFX on Death"), Tg("No Death Effect", "Skips the death explosion."),
+            Tg("Frame Stepper", "", "fstep"), Tg("Hide Player", "Makes the player invisible.", "hideplr"),
+            Tg("Jump Hack", "Lets you jump at any time.", "jumphack"), Tg("Mute Level Audio on Death"),
+            Tg("Mute Rewards SFX on Death"), Tg("No Death Effect", "Skips the death explosion.", "nde"),
             Tg("No Ghost Trail"), Tg("No Hide Trigger"),
             Tg("No Platformer Jump Anim"), Tg("No Respawn Flash"),
             Tg("No Robot Fire"), Tg("No Spider Dash"),
-            Tg("No Trail"), Tg("No Vehicle Particles"),
+            Tg("No Trail", "", "notrail"), Tg("No Vehicle Particles"),
             Tg("No Wave Trail Behind"), Tg("Noclip", "Take no damage from hazards and solids.", "noclip"),
             Tg("Shipcopter"), Tg("Show Trajectory", "", "traj"),
             Tg("Solid Wave Trail"), Tg("Wave Trail On Death", "", "wtod"),
             Inp("Respawn Delay", "respawndelay", 1),
         }},
-        {"Bot", { Nt("Nothing here yet.") }},
+        {"Bot", {
+            Sp("Bot Mode", "botmode", 0, 2, 1, 0, {"Off", "Record", "Replay"}),
+            Tg("Use Anchors", "", "anchors", true),
+            Tg("Show Anchors"),
+            Bt("Add Anchor Now", "bot_anchor"),
+            Bt("Clear Macro", "bot_clear"),
+            Bt("Save Macro", "bot_save"),
+            Bt("Load Macro", "bot_load"),
+        }},
         {"Creator", { Nt("Nothing here yet.") }},
         {"Labels", {}},   // custom page
         {"Shortcuts", {
@@ -289,6 +299,8 @@ static std::vector<Tab> const& tabs() {
             Sp("Dot Size", "dotsize", 10, 30, 2, 18),
             Sp("Dot Opacity", "dotop", 0.1, 1, 0.1, 0.6),
             TK("togglenotifications", "Toggle Notifications"),
+            TK("holdinfo", "Hold For Descriptions", true),
+            Sp("Hold Time", "holdtime", 0.2, 1.5, 0.1, 0.5),
             Bt("Reset Dot Position", "resetdot"),
             Bt("Reset Style", "resetstyle"),
         }},
@@ -325,6 +337,30 @@ static std::vector<Feat> const& subPage(std::string const& id) {
             Sp("Trail Color", "trailcol", 0, 8, 1, 2, COLNAMES),
             Sp("Line Thickness", "hbthick", 0.5, 3, 0.5, 1),
         }},
+        {"speedhack", { TK("speed_practice", "Only In Practice") }},
+        {"autosafe", {
+            TK("asm_noclip", "Trigger On Noclip", true),
+            TK("asm_jump", "Trigger On Jump Hack", true),
+            TK("asm_speed", "Trigger On Speedhack", true),
+            TK("asm_bot", "Trigger On Bot Replay", true),
+        }},
+        {"safemode", { TK("sm_notify", "Warn On Level Complete") }},
+        {"accpct", { Sp("Decimals", "accdec", 1, 3, 1, 2) }},
+        {"jumphack", { TK("jh_p1only", "Player 1 Only"), TK("jh_practice", "Only In Practice") }},
+        {"hideplr", { TK("hp_keepp1", "Keep Player 1 Visible"), TK("hp_keepp2", "Keep Player 2 Visible") }},
+        {"nde", { TK("nde_practice", "Only In Practice") }},
+        {"notrail", { TK("nt_p2", "Also Player 2", true) }},
+        {"unlockicons", { TK("ui_colors", "Include Colors", true) }},
+        {"cheat", {
+            Sp("Dot Size", "chdot", 2, 12, 1, 5),
+            Sp("Corner", "chcorner", 0, 3, 1, 1, {"Top Left", "Top Right", "Bottom Left", "Bottom Right"}),
+        }},
+        {"anchors", {
+            Sp("Anchor Interval", "anchorint", 10, 600, 10, 60),
+            Sp("Position Tolerance", "anchortol", 0, 20, 0.5, 1.5),
+            TK("anchor_vel", "Restore Velocity", true),
+            TK("anchor_rot", "Restore Rotation"),
+        }},
         {"labelstyle", {
             Sp("Label Size", "lblscale", 0.5, 2, 0.1, 1),
             Sp("Label Color", "lblcol", 0, 8, 1, 8, COLNAMES),
@@ -340,7 +376,7 @@ static bool isImpl(std::string const& k) {
     static std::set<std::string> const s = {
         "speedhack", "safemode", "autosafemode", "noclip", "jumphack", "hideplayer", "nodeatheffect",
         "unlockicons", "autoldm", "autopracticemode", "showhitboxes", "hitboxesondeath",
-        "accuratepercentage", "freezeattempts", "notrail", "showlabels", "cheatindicator", "togglenotifications"
+        "accuratepercentage", "freezeattempts", "notrail", "holdinfo", "useanchors", "showanchors", "showlabels", "cheatindicator", "togglenotifications"
     };
     return s.count(k) > 0;
 }
@@ -352,6 +388,364 @@ static std::string fmtVal(Feat const& r, double v) {
     }
     return r.step >= 1.0 ? fmt::format("{:.0f}", v) : fmt::format("{:.1f}", v);
 }
+
+
+// ───────────────────────── bot (macro + anchors) ─────────────────────────
+struct PState { float x = 0, y = 0, rot = 0; double yv = 0; bool up = false; };
+struct Anchor { int frame = 0; bool dual = false; PState p1, p2; };
+struct BInput { int frame = 0; bool down = false; int button = 1; bool p1 = true; };
+static std::vector<BInput> s_inputs;
+static std::vector<Anchor> s_anchors;
+static int s_fixes = 0;
+static bool s_injecting = false;
+
+static int botFrame(GJBaseGameLayer* gl) { return (int)gl->m_gameState.m_currentProgress; }
+static PState snapP(PlayerObject* p) {
+    PState s;
+    if (!p) return s;
+    s.x = p->getPositionX(); s.y = p->getPositionY(); s.rot = p->getRotation();
+    s.yv = p->m_yVelocity; s.up = p->m_isUpsideDown;
+    return s;
+}
+static void applyP(PlayerObject* p, PState const& s) {
+    if (!p) return;
+    p->setPosition(CCPoint(s.x, s.y));
+    if (optd("anchor_vel", true)) p->m_yVelocity = s.yv;
+    if (opt("anchor_rot")) p->setRotation(s.rot);
+}
+static bool offPath(PlayerObject* p, PState const& s) {
+    if (!p) return false;
+    float dx = p->getPositionX() - s.x, dy = p->getPositionY() - s.y;
+    if (std::sqrt(dx * dx + dy * dy) > (float)getVal("anchortol", 1.5)) return true;
+    return optd("anchor_vel", true) && std::fabs(p->m_yVelocity - s.yv) > 0.5;
+}
+static void addAnchor(PlayLayer* pl) {
+    int fr = botFrame(pl);
+    Anchor a;
+    a.frame = fr;
+    a.p1 = snapP(pl->m_player1);
+    a.dual = pl->m_gameState.m_isDualMode;
+    if (a.dual) a.p2 = snapP(pl->m_player2);
+    while (!s_anchors.empty() && s_anchors.back().frame >= fr) s_anchors.pop_back();
+    s_anchors.push_back(a);
+}
+// runs at the start of every physics step
+static void botStep(GJBaseGameLayer* gl) {
+    int mode = (int)getVal("botmode", 0);
+    if (mode == 0) return;
+    auto pl = PlayLayer::get();
+    if (!pl || static_cast<GJBaseGameLayer*>(pl) != gl) return;
+    if (pl->m_player1 && pl->m_player1->m_isDead) return;
+    int fr = botFrame(gl);
+    bool useA = optd("useanchors", true);
+    if (mode == 1) {
+        int iv = std::max(1, (int)getVal("anchorint", 60.0));
+        if (useA && fr > 0 && fr % iv == 0) addAnchor(pl);
+        return;
+    }
+    // replay: inject the recorded inputs for this frame
+    auto it = std::lower_bound(s_inputs.begin(), s_inputs.end(), fr,
+                               [](BInput const& a, int f) { return a.frame < f; });
+    s_injecting = true;
+    for (; it != s_inputs.end() && it->frame == fr; ++it)
+        gl->handleButton(it->down, it->button, it->p1);
+    s_injecting = false;
+    // then put the player back on the path if it drifted
+    if (useA) {
+        auto ai = std::lower_bound(s_anchors.begin(), s_anchors.end(), fr,
+                                   [](Anchor const& a, int f) { return a.frame < f; });
+        if (ai != s_anchors.end() && ai->frame == fr) {
+            if (offPath(pl->m_player1, ai->p1)) { applyP(pl->m_player1, ai->p1); s_fixes++; }
+            if (ai->dual && pl->m_gameState.m_isDualMode && offPath(pl->m_player2, ai->p2)) {
+                applyP(pl->m_player2, ai->p2); s_fixes++;
+            }
+        }
+    }
+}
+
+static std::filesystem::path macroPath() { return Mod::get()->getSaveDir() / "macro.txt"; }
+static void writeP(std::ostream& o, PState const& p) {
+    o << p.x << ' ' << p.y << ' ' << p.rot << ' ' << p.yv << ' ' << (p.up ? 1 : 0) << ' ';
+}
+static void readP(std::istream& i, PState& p) {
+    int u = 0;
+    i >> p.x >> p.y >> p.rot >> p.yv >> u;
+    p.up = u != 0;
+}
+static bool saveMacro() {
+    std::ofstream o(macroPath());
+    if (!o) return false;
+    for (auto const& a : s_inputs) o << "I " << a.frame << ' ' << (a.down ? 1 : 0) << ' ' << a.button << ' ' << (a.p1 ? 1 : 0) << '\n';
+    for (auto const& a : s_anchors) {
+        o << "A " << a.frame << ' ' << (a.dual ? 1 : 0) << ' ';
+        writeP(o, a.p1); writeP(o, a.p2);
+        o << '\n';
+    }
+    return true;
+}
+static bool loadMacro() {
+    std::ifstream i(macroPath());
+    if (!i) return false;
+    s_inputs.clear(); s_anchors.clear();
+    std::string tag;
+    while (i >> tag) {
+        if (tag == "I") {
+            BInput b; int d = 0, p = 1;
+            i >> b.frame >> d >> b.button >> p;
+            b.down = d != 0; b.p1 = p != 0;
+            s_inputs.push_back(b);
+        } else if (tag == "A") {
+            Anchor a; int d = 0;
+            i >> a.frame >> d;
+            a.dual = d != 0;
+            readP(i, a.p1); readP(i, a.p2);
+            s_anchors.push_back(a);
+        } else break;
+    }
+    return true;
+}
+
+// ───────────────────────── descriptions (shown on hold) ─────────────────────────
+static std::vector<std::pair<char const*, char const*>> const DESC_LIST = {
+    {"Physics Bypass", "Sets the physics ticks per second. Not implemented yet."},
+    {"Speedhack", "Changes the game speed while you are in a level."},
+    {"Pitch Shift", "Shifts the music pitch. Not implemented yet."},
+    {"Audio Speed", "Changes the music speed. Not implemented yet."},
+    {"Sync with Speedhack", "Makes the music follow the speedhack. Not implemented yet."},
+    {"Auto Safe Mode", "Turns Safe Mode on automatically once a cheat is used, so cheated runs never save progress."},
+    {"Click Between Steps", "Registers clicks between physics steps. Not implemented yet."},
+    {"Click On Steps", "Only registers clicks on physics steps. Not implemented yet."},
+    {"Compact Editor Levels", "Smaller level rows in the editor list. Not implemented yet."},
+    {"Compact Profile Comments", "Smaller comment rows on profiles. Not implemented yet."},
+    {"No Short Numbers", "Shows full numbers instead of 1.2K style. Not implemented yet."},
+    {"Safe Mode", "Completions and progress are never saved while this is on."},
+    {"Show Taps", "Shows where you tap on screen. Not implemented yet."},
+    {"0% Practice Completion", "Allows completing practice mode from 0%. Not implemented yet."},
+    {"Accurate Percentage", "Shows decimals on the percentage label."},
+    {"All Modes in Platformer", "Lets every gamemode work in platformer levels. Not implemented yet."},
+    {"All Passable", "Makes every solid block passable. Not implemented yet."},
+    {"Always Show Coins", "Shows coins even before they are unlocked. Not implemented yet."},
+    {"Auto LDM", "Turns on Low Detail Mode automatically."},
+    {"Auto Pickup Coins", "Collects coins automatically. Not implemented yet."},
+    {"Auto Practice Mode", "Enters practice mode as soon as a level starts."},
+    {"Auto Song Download", "Downloads missing songs automatically. Not implemented yet."},
+    {"Checkpoint Delay", "Delays practice checkpoint placement. Not implemented yet."},
+    {"Confirm Full Restart", "Asks before restarting from the start. Not implemented yet."},
+    {"Confirm Practice Mode", "Asks before entering practice mode. Not implemented yet."},
+    {"Confirm Restart", "Asks before restarting. Not implemented yet."},
+    {"Force Platformer", "Plays any level as a platformer. Not implemented yet."},
+    {"Freeze Attempts", "The attempt counter stops going up."},
+    {"Hide Level Complete VFX", "Hides the end of level effects. Not implemented yet."},
+    {"Hide Pause Menu", "Hides the pause menu. Not implemented yet."},
+    {"Hitbox Multiplier", "Scales the size of hitboxes. Not implemented yet."},
+    {"Instant Mirror", "Mirror portals flip instantly. Not implemented yet."},
+    {"Layout Mode", "Hides decoration so only the layout shows. Not implemented yet."},
+    {"Legacy Pulse", "Old style pulse effects. Not implemented yet."},
+    {"Legacy Reverse Physics", "Old reverse physics behaviour. Not implemented yet."},
+    {"Legacy Trail", "Old style player trail. Not implemented yet."},
+    {"Match Percent/Time Fonts", "Uses the same font for percent and time labels. Not implemented yet."},
+    {"Mute Level SFX", "Mutes sound effects inside levels. Not implemented yet."},
+    {"No End Shake", "Removes the screen shake at the end. Not implemented yet."},
+    {"No Mirror", "Mirror portals do nothing. Not implemented yet."},
+    {"No Music Fade Out", "Music does not fade out. Not implemented yet."},
+    {"No Object Glow", "Removes object glow. Not implemented yet."},
+    {"No Particles", "Removes particles. Not implemented yet."},
+    {"No Portal Lightning", "Removes portal lightning. Not implemented yet."},
+    {"No Shaders", "Turns off shader effects. Not implemented yet."},
+    {"Pause Countdown", "Counts down before resuming. Not implemented yet."},
+    {"Pause During Complete", "Lets you pause during the complete animation. Not implemented yet."},
+    {"Practice Coins", "Lets practice mode collect coins. Not implemented yet."},
+    {"Practice Fix", "Fixes practice mode checkpoint bugs. Not implemented yet."},
+    {"Random Seed", "Fixes the random trigger seed. Not implemented yet."},
+    {"Show Hitboxes", "Draws hitboxes for hazards, solids and the player."},
+    {"Hitboxes On Death", "Freezes the hitboxes on screen at the moment you die."},
+    {"Show Triggers", "Shows trigger objects. Not implemented yet."},
+    {"Smart StartPos", "Fixes start positions. Not implemented yet."},
+    {"StartPos Switcher", "Switch between start positions. Not implemented yet."},
+    {"Stop Triggers on Death", "Stops triggers when you die. Not implemented yet."},
+    {"Allow Low Volume", "Lets volume go lower than normal. Not implemented yet."},
+    {"Character Filter Bypass", "Bypasses the text filter. Not implemented yet."},
+    {"Character Limit Bypass", "Bypasses text length limits. Not implemented yet."},
+    {"Checkpoint Limit", "Removes the checkpoint limit. Not implemented yet."},
+    {"Quick Chests", "No waiting on chests. Not implemented yet."},
+    {"Instant Complete", "Completes the level instantly. Not implemented yet."},
+    {"Level Kick", "Stops the game kicking you out of levels. Not implemented yet."},
+    {"Menu Gameplay", "Lets you play on the main menu. Not implemented yet."},
+    {"Music Customizer", "Pick custom music. Not implemented yet."},
+    {"Pause Buffering", "Buffers inputs while paused. Not implemented yet."},
+    {"Practice Music Sync", "Syncs music in practice mode. Not implemented yet."},
+    {"Show Spam Comments", "Shows hidden spam comments. Not implemented yet."},
+    {"Swift Click", "Faster menu clicking. Not implemented yet."},
+    {"Unlock Icons", "Unlocks every icon and colour."},
+    {"Unlock Main Levels", "Unlocks main levels. Not implemented yet."},
+    {"Unlock Paths", "Unlocks paths. Not implemented yet."},
+    {"Unlock Shops", "Unlocks shops. Not implemented yet."},
+    {"Unlock Vaults", "Unlocks vaults. Not implemented yet."},
+    {"Always Show Trail", "Always shows the player trail. Not implemented yet."},
+    {"AutoClicker", "Clicks automatically. Not implemented yet."},
+    {"Auto Kill", "Kills you at a set point. Not implemented yet."},
+    {"Ball Rotation Bug", "Brings back the ball rotation bug. Not implemented yet."},
+    {"Custom Wave Trail", "Custom wave trail style. Not implemented yet."},
+    {"Force Ghost Trail", "Always shows the ghost trail. Not implemented yet."},
+    {"Frame Stepper", "Step the game one frame at a time. Not implemented yet."},
+    {"Hide Player", "Makes the player invisible."},
+    {"Jump Hack", "Lets you jump at any time, even in the air."},
+    {"Mute Level Audio on Death", "Mutes level audio when you die. Not implemented yet."},
+    {"Mute Rewards SFX on Death", "Mutes reward sounds on death. Not implemented yet."},
+    {"No Death Effect", "Skips the death explosion."},
+    {"No Ghost Trail", "Removes the ghost trail. Not implemented yet."},
+    {"No Hide Trigger", "Ignores hide player triggers. Not implemented yet."},
+    {"No Platformer Jump Anim", "Removes the platformer jump animation. Not implemented yet."},
+    {"No Respawn Flash", "Removes the flash on respawn. Not implemented yet."},
+    {"No Robot Fire", "Removes robot fire. Not implemented yet."},
+    {"No Spider Dash", "Removes the spider dash effect. Not implemented yet."},
+    {"No Trail", "Hides the player's motion trail."},
+    {"No Vehicle Particles", "Removes vehicle particles. Not implemented yet."},
+    {"No Wave Trail Behind", "Hides the wave trail behind. Not implemented yet."},
+    {"Noclip", "You do not die when hitting hazards or solids."},
+    {"Shipcopter", "Ship flies like a copter. Not implemented yet."},
+    {"Show Trajectory", "Shows where you will go. Not implemented yet."},
+    {"Solid Wave Trail", "Makes the wave trail solid. Not implemented yet."},
+    {"Wave Trail On Death", "Keeps the wave trail after death. Not implemented yet."},
+    {"Respawn Delay", "Time before you respawn. Not implemented yet."},
+    {"Bot Mode", "Off, Record (saves your inputs and anchors) or Replay (plays them back)."},
+    {"Use Anchors", "While recording, saves your position and velocity every few frames. While replaying, snaps you back onto the path if you drift off it."},
+    {"Show Anchors", "Draws a dot at every saved anchor point."},
+    {"Add Anchor Now", "Saves an anchor at your current position and velocity right now (inside a level)."},
+    {"Clear Macro", "Deletes the recorded inputs and anchors from memory."},
+    {"Save Macro", "Saves the recorded macro to a file."},
+    {"Load Macro", "Loads the saved macro from the file."},
+    {"Anchor Interval", "How many frames between automatic anchors while recording."},
+    {"Position Tolerance", "How far off path you can be before an anchor moves you back."},
+    {"Restore Velocity", "Anchors also restore vertical velocity."},
+    {"Restore Rotation", "Anchors also restore the player rotation."},
+    {"Accent", "Colour of the selected tab and the dot."},
+    {"Menu Opacity", "How see-through the menu is."},
+    {"Dot Size", "Size of the dot or of the cheat indicator."},
+    {"Dot Opacity", "How see-through the dot is."},
+    {"Toggle Notifications", "Shows a pop up whenever you flip a toggle."},
+    {"Hold For Descriptions", "Hold your finger on a label to see what it does."},
+    {"Hold Time", "How long you hold before the description shows."},
+    {"Reset Dot Position", "Moves the dot back to the top left."},
+    {"Reset Style", "Resets accent, opacity and dot settings."},
+    {"Restart Level", "Restarts the level you are in."},
+    {"Toggle Practice Mode", "Turns practice mode on or off."},
+    {"Respawn From Start", "Restarts from the beginning, ignoring checkpoints."},
+    {"Toggle Hitboxes", "Turns Show Hitboxes on or off."},
+    {"Toggle Noclip", "Turns Noclip on or off."},
+    {"Show Labels", "Master switch for all HUD labels."},
+    {"Show in Editor", "Show labels in the editor. Not implemented yet."},
+    {"Cheat Indicator", "A dot that turns red once a cheat has been used this level."},
+    {"Noclip P1 Only", "Noclip only applies to player 1."},
+    {"Noclip P2 Only", "Noclip only applies to player 2."},
+    {"Noclip Flash", "Flashes the screen when noclip saves you."},
+    {"Flash Color", "Colour of the noclip flash."},
+    {"Flash Opacity", "Strength of the noclip flash."},
+    {"Only In Practice", "Only works in practice mode."},
+    {"Pass Hazards Only", "Noclip only ignores hazards."},
+    {"Pass Solids Only", "Noclip only ignores solids."},
+    {"Red Hitbox On Block", "Player hitbox turns red when noclip blocks a death."},
+    {"Start At %", "Noclip turns on at this percentage."},
+    {"Stop At %", "Noclip turns off at this percentage."},
+    {"Min Accuracy %", "Kills you if noclip accuracy drops below this."},
+    {"Max NC Deaths", "Kills you after this many blocked deaths."},
+    {"Fill Hitboxes", "Fills hitboxes with a faint colour."},
+    {"Hitbox Trail", "Draws a trail of your player hitbox."},
+    {"Trail Length", "How long the hitbox trail is."},
+    {"Hazard Color", "Colour of hazard hitboxes."},
+    {"Solid Color", "Colour of solid hitboxes."},
+    {"Player Color", "Colour of the player hitbox."},
+    {"Trail Color", "Colour of the hitbox trail."},
+    {"Line Thickness", "Thickness of hitbox lines."},
+    {"Label Size", "Size of the HUD labels."},
+    {"Label Color", "Colour of the HUD labels."},
+    {"Label Opacity", "How see-through the HUD labels are."},
+    {"Trigger On Noclip", "Auto Safe Mode turns on when you use noclip."},
+    {"Trigger On Jump Hack", "Auto Safe Mode turns on when you use jump hack."},
+    {"Trigger On Speedhack", "Auto Safe Mode turns on when you change speed."},
+    {"Trigger On Bot Replay", "Auto Safe Mode turns on when you replay a macro."},
+    {"Warn On Level Complete", "Shows a warning when a Safe Mode completion is not saved."},
+    {"Decimals", "How many decimals the percentage shows."},
+    {"Player 1 Only", "Only player 1 gets jump hack."},
+    {"Keep Player 1 Visible", "Player 1 stays visible when hiding the player."},
+    {"Keep Player 2 Visible", "Player 2 stays visible when hiding the player."},
+    {"Also Player 2", "No Trail also applies to player 2."},
+    {"Include Colors", "Unlock Icons also unlocks colours."},
+    {"Corner", "Which corner the cheat indicator sits in."},
+    // hud labels
+    {"FPS", "Shows your frames per second."},
+    {"Testmode", "Shows Safe Mode or Testmode when progress will not save."},
+    {"Run From", "Percentage this run started from."},
+    {"Attempt", "Current attempt number."},
+    {"Percentage", "Current level percentage."},
+    {"Level Time", "Time spent in this attempt."},
+    {"Best Run", "Best percentage this session."},
+    {"Clock", "The time of day."},
+    {"CPS", "Clicks per second."},
+    {"Noclip Accuracy", "How much of the run noclip did not have to save you."},
+    {"Noclip Deaths", "How many deaths noclip blocked this attempt."},
+    {"Jumps", "Clicks this attempt."},
+    {"Level Name", "Name of the level."},
+    {"Bot", "Bot mode, macro size and how many times anchors fixed you."},
+};
+static std::string descByLabel(std::string const& label) {
+    static std::map<std::string, std::string> m = [] {
+        std::map<std::string, std::string> r;
+        for (auto const& kv : DESC_LIST) r[autoKey(kv.first)] = kv.second;
+        return r;
+    }();
+    auto it = m.find(autoKey(label));
+    return it == m.end() ? std::string() : it->second;
+}
+static std::string descOf(Feat const& f) {
+    if (!f.info.empty()) return f.info;
+    auto d = descByLabel(f.label);
+    return d.empty() ? std::string("No description yet.") : d;
+}
+
+// holding a finger on a label shows its description
+class HoldLabel : public CCNode, public CCTouchDelegate {
+public:
+    CCNode* m_target = nullptr;
+    std::string m_title, m_text;
+    bool m_down = false, m_fired = false;
+    float m_t = 0.f;
+    CCPoint m_start;
+
+    static HoldLabel* create(CCNode* target, std::string title, std::string text) {
+        auto r = new HoldLabel();
+        if (r && r->init()) {
+            r->m_target = target; r->m_title = std::move(title); r->m_text = std::move(text);
+            r->scheduleUpdate();
+            r->autorelease();
+            return r;
+        }
+        CC_SAFE_DELETE(r);
+        return nullptr;
+    }
+    void onEnter() override {
+        CCNode::onEnter();
+        CCTouchDispatcher::get()->addTargetedDelegate(this, -130, false); // doesn't swallow: scrolling still works
+    }
+    void onExit() override {
+        CCTouchDispatcher::get()->removeDelegate(this);
+        CCNode::onExit();
+    }
+    bool ccTouchBegan(CCTouch* t, CCEvent*) override;
+    void ccTouchMoved(CCTouch* t, CCEvent*) override {
+        if (m_down && ccpDistance(t->getLocation(), m_start) > 10.f) m_down = false;
+    }
+    void ccTouchEnded(CCTouch*, CCEvent*) override { m_down = false; }
+    void ccTouchCancelled(CCTouch*, CCEvent*) override { m_down = false; }
+    void update(float dt) override {
+        if (!m_down || m_fired) return;
+        m_t += dt;
+        if (m_t >= (float)getVal("holdtime", 0.5)) {
+            m_fired = true;
+            Notification::create(m_title + ": " + m_text, NotificationIcon::Info, 3.f)->show();
+        }
+    }
+};
 
 // ───────────────────────── widgets ─────────────────────────
 static CCScale9Sprite* makeBox(float w, float h, ccColor3B col, GLubyte op = 255) {
@@ -684,6 +1078,15 @@ public:
         b->setPosition({x, y});
         menu->addChild(b);
     }
+    CCLabelBMFont* addHold(CCNode* cl, CCLabelBMFont* l, std::string const& title, std::string const& text) {
+        if (l) cl->addChild(HoldLabel::create(l, title, text));
+        return l;
+    }
+    bool inScroll(CCTouch* t) {
+        if (!m_panel) return false;
+        auto p = m_panel->convertTouchToNodeSpace(t);
+        return CCRect(m_cx, m_cy, m_cw, m_ch).containsPoint(p);
+    }
     CCLabelBMFont* addText(CCNode* parent, std::string const& s, float x, float y, float maxW,
                            float sc = 0.4f, bool center = false) {
         auto l = CCLabelBMFont::create(s.c_str(), "bigFont.fnt");
@@ -753,13 +1156,15 @@ public:
                         right -= 26.f;
                     }
                     addIcon(menu, iconInfo(), right - 8.f, y, i, menu_selector(ModMenu::onInfo));
-                    addText(cl, f.label, lx, y, right - 18.f - lx);
+                    addHold(cl, addText(cl, f.label, lx, y, right - 18.f - lx), f.label, descOf(f));
                 } else if (f.k == Feat::Input) {
-                    addText(cl, f.label, lx, y, W * 0.6f - lx);
-                    float bw = W * 0.30f;
+                    bool g = !f.gear.empty();
+                    addHold(cl, addText(cl, f.label, lx, y, W * (g ? 0.46f : 0.6f) - lx), f.label, descOf(f));
+                    if (g) addIcon(menu, iconGear(), W - 16.f, y, i, menu_selector(ModMenu::onGear));
+                    float bw = W * (g ? 0.26f : 0.30f);
                     auto ti = TextInput::create(bw / 0.75f, "0", "bigFont.fnt");
                     ti->setScale(0.75f);
-                    ti->setPosition({W * 0.80f, y});
+                    ti->setPosition({W * (g ? 0.72f : 0.80f), y});
                     ti->setCommonFilter(CommonFilter::Float);
                     ti->setString(fmt::format("{}", getVal(f.valKey.c_str(), f.vdef)));
                     std::string vk = f.valKey;
@@ -769,7 +1174,7 @@ public:
                     });
                     cl->addChild(ti, 3);
                 } else if (f.k == Feat::Stepper) {
-                    addText(cl, f.label, lx, y, W - 112.f - lx);
+                    addHold(cl, addText(cl, f.label, lx, y, W - 112.f - lx), f.label, descOf(f));
                     auto mk = [&](char const* str, SEL_MenuHandler cb, float x) {
                         auto lab = CCLabelBMFont::create(str, "goldFont.fnt");
                         lab->setScale(0.8f);
@@ -853,7 +1258,7 @@ public:
             auto box = makeBox(W * 0.35f, 22.f, C_INPUT);
             box->setPosition({W * 0.09f + W * 0.175f, y});
             cl->addChild(box);
-            addText(cl, lblName(id), W * 0.265f, y, W * 0.32f, 0.36f, true);
+            addHold(cl, addText(cl, lblName(id), W * 0.265f, y, W * 0.32f, 0.36f, true), lblName(id), descByLabel(lblName(id)));
             addIcon(menu, iconArrow(false), W * 0.50f, y, i, menu_selector(ModMenu::onLblDown));
             addIcon(menu, iconArrow(true), W * 0.58f, y, i, menu_selector(ModMenu::onLblUp));
             addIcon(menu, iconGear(), W * 0.84f, y, i, menu_selector(ModMenu::onLblGear));
@@ -889,7 +1294,7 @@ public:
         int i = static_cast<CCNode*>(s)->getTag();
         if (i < 0 || i >= (int)m_feats.size()) return;
         auto const& f = m_feats[i];
-        Notification::create(f.label + ": " + (f.info.empty() ? std::string("No description yet.") : f.info),
+        Notification::create(f.label + ": " + descOf(f),
                              NotificationIcon::Info, 2.5f)->show();
     }
 
@@ -922,6 +1327,29 @@ public:
         std::string k = m_feats[i].key;
         if (k == "resetdot") {
             if (m_dot) m_dot->resetPos(true);
+        } else if (k.rfind("bot_", 0) == 0) {
+            if (k == "bot_clear") {
+                s_inputs.clear(); s_anchors.clear(); s_fixes = 0;
+                Notification::create("Macro cleared", NotificationIcon::None, 1.f)->show();
+            } else if (k == "bot_save") {
+                bool ok = saveMacro();
+                Notification::create(ok ? fmt::format("Saved {} inputs, {} anchors", s_inputs.size(), s_anchors.size())
+                                        : std::string("Couldn't save macro"),
+                                     ok ? NotificationIcon::Success : NotificationIcon::Error, 1.5f)->show();
+            } else if (k == "bot_load") {
+                bool ok = loadMacro();
+                Notification::create(ok ? fmt::format("Loaded {} inputs, {} anchors", s_inputs.size(), s_anchors.size())
+                                        : std::string("No saved macro found"),
+                                     ok ? NotificationIcon::Success : NotificationIcon::Error, 1.5f)->show();
+            } else if (k == "bot_anchor") {
+                auto pl = PlayLayer::get();
+                if (!pl) Notification::create("Only works inside a level", NotificationIcon::Warning, 1.2f)->show();
+                else {
+                    addAnchor(pl);
+                    Notification::create(fmt::format("Anchor added at frame {}", botFrame(pl)),
+                                         NotificationIcon::Success, 1.f)->show();
+                }
+            }
         } else if (k.rfind("sc_", 0) == 0) {
             auto pl = PlayLayer::get();
             if (k == "sc_hitbox") {
@@ -1003,7 +1431,8 @@ public:
         bool inLevel = PlayLayer::get() != nullptr;
 
         float want = 1.f;
-        if (inLevel && opt("speedhack")) want = (float)std::max(0.01, getVal("speed", 1.0));
+        if (inLevel && opt("speedhack") && (!opt("speed_practice") || PlayLayer::get()->m_isPracticeMode))
+            want = (float)std::max(0.01, getVal("speed", 1.0));
         if (sched->getTimeScale() != want) sched->setTimeScale(want);
 
         float scale = sched->getTimeScale();
@@ -1037,6 +1466,20 @@ public:
     }
 };
 
+inline bool HoldLabel::ccTouchBegan(CCTouch* t, CCEvent*) {
+    if (!optd("holdinfo", true)) return false;
+    auto mm = ModMenu::s_inst;
+    if (!mm || !mm->m_open || !mm->inScroll(t)) return false;
+    if (!m_target || !m_target->getParent() || !m_target->isVisible()) return false;
+    auto p = m_target->getParent()->convertTouchToNodeSpace(t);
+    auto r = m_target->boundingBox();
+    r.origin.x -= 4.f; r.origin.y -= 4.f; r.size.width += 8.f; r.size.height += 8.f;
+    if (!r.containsPoint(p)) return false;
+    m_down = true; m_fired = false; m_t = 0.f;
+    m_start = t->getLocation();
+    return true;
+}
+
 class $modify(MenuLayer) {
     bool init() {
         if (!MenuLayer::init()) return false;
@@ -1065,8 +1508,18 @@ class $modify(CCKeyboardDispatcher) {
 // ───────────────────────── small hooks ─────────────────────────
 class $modify(GJBaseGameLayer) {
     void handleButton(bool down, int button, bool isPlayer1) {
+        auto pl = PlayLayer::get();
+        if (pl && static_cast<GJBaseGameLayer*>(pl) == this && !s_injecting) {
+            int mode = (int)getVal("botmode", 0);
+            if (mode == 2) return; // replaying: real taps are ignored
+            if (mode == 1) s_inputs.push_back({botFrame(this), down, button, isPlayer1});
+        }
         if (down) { s_clicks.push_back(nowSec()); s_attemptClicks++; }
         GJBaseGameLayer::handleButton(down, button, isPlayer1);
+    }
+    void processCommands(float dt) {
+        botStep(this);
+        GJBaseGameLayer::processCommands(dt);
     }
 };
 
@@ -1083,7 +1536,10 @@ static bool ncBase(PlayLayer* pl, PlayerObject* p) {
 
 class $modify(PlayerObject) {
     void playDeathEffect() {
-        if (opt("nodeatheffect")) return;
+        if (opt("nodeatheffect")) {
+            auto pl = PlayLayer::get();
+            if (!opt("nde_practice") || (pl && pl->m_isPracticeMode)) return;
+        }
         PlayerObject::playDeathEffect();
     }
     // Fallback: some solid-block deaths don't go through the PlayLayer::destroyPlayer hook,
@@ -1104,7 +1560,7 @@ class $modify(GameManager) {
         return GameManager::isIconUnlocked(id, type);
     }
     bool isColorUnlocked(int id, UnlockType type) {
-        if (opt("unlockicons")) return true;
+        if (opt("unlockicons") && optd("ui_colors", true)) return true;
         return GameManager::isColorUnlocked(id, type);
     }
 };
@@ -1115,6 +1571,7 @@ class $modify(HMPlayLayer, PlayLayer) {
         CCDrawNode* trailNode = nullptr;
         CCDrawNode* hitNode = nullptr;
         CCDrawNode* cheatDot = nullptr;
+        CCDrawNode* anchorNode = nullptr;
         std::deque<std::vector<CCRect>> hist;
         std::map<std::string, CCLabelBMFont*> labels;
         CCLayerColor* flash = nullptr;
@@ -1167,6 +1624,8 @@ class $modify(HMPlayLayer, PlayLayer) {
             m_objectLayer->addChild(f->trailNode, 1000);
             f->hitNode = CCDrawNode::create();
             m_objectLayer->addChild(f->hitNode, 1001);
+            f->anchorNode = CCDrawNode::create();
+            m_objectLayer->addChild(f->anchorNode, 1002);
         }
     }
 
@@ -1214,11 +1673,23 @@ class $modify(HMPlayLayer, PlayLayer) {
         f->prevBlocked = false;
         PlayLayer::resetLevel();
         f->runFrom = this->getCurrentPercent();
+        int bm = (int)getVal("botmode", 0);
+        if (bm == 1) {
+            int cur = m_isPracticeMode ? (int)m_gameState.m_currentProgress : 0;
+            s_inputs.erase(std::remove_if(s_inputs.begin(), s_inputs.end(),
+                           [cur](BInput const& b) { return b.frame >= cur; }), s_inputs.end());
+            s_anchors.erase(std::remove_if(s_anchors.begin(), s_anchors.end(),
+                            [cur](Anchor const& a) { return a.frame >= cur; }), s_anchors.end());
+        } else if (bm == 2 && !m_isPracticeMode) s_fixes = 0;
     }
 
     // Safe mode: completions/progress are not saved once cheats were used
     void levelComplete() {
-        if (isSafe()) m_isTestMode = true;
+        if (isSafe()) {
+            m_isTestMode = true;
+            if (opt("sm_notify"))
+                Notification::create("Safe Mode: this completion won't be saved", NotificationIcon::Warning, 2.f)->show();
+        }
         PlayLayer::levelComplete();
     }
     void onQuit() {
@@ -1271,9 +1742,11 @@ class $modify(HMPlayLayer, PlayLayer) {
         // cheat indicator
         if (f->cheatDot) {
             f->cheatDot->clear();
+            int cc = std::clamp((int)getVal("chcorner", 1.0), 0, 3);
+            f->cheatDot->setPosition(CCPoint((cc % 2 == 0) ? 14.f : win.width - 14.f, (cc < 2) ? win.height - 14.f : 14.f));
             if (master && opt("cheatindicator")) {
                 ccColor4F c = f->cheated ? ccColor4F{1.f, 0.2f, 0.2f, 0.9f} : ccColor4F{0.3f, 1.f, 0.4f, 0.9f};
-                f->cheatDot->drawDot({0, 0}, 5.f, c);
+                f->cheatDot->drawDot({0, 0}, (float)getVal("chdot", 5.0), c);
             }
         }
 
@@ -1292,7 +1765,7 @@ class $modify(HMPlayLayer, PlayLayer) {
             std::string txt;
             if (id == "fps") txt = fmt::format("FPS: {}", (int)(s_fps + 0.5f));
             else if (id == "pct")
-                txt = opt("accuratepercentage") ? fmt::format("{:.2f}%", pct) : fmt::format("{}%", (int)pct);
+                txt = opt("accuratepercentage") ? fmt::format("{:.{}f}%", pct, std::clamp((int)getVal("accdec", 2.0), 1, 3)) : fmt::format("{}%", (int)pct);
             else if (id == "attempt") txt = fmt::format("Attempt {}", f->attempts);
             else if (id == "time") {
                 int m = (int)(f->levelTime / 60.f);
@@ -1309,6 +1782,12 @@ class $modify(HMPlayLayer, PlayLayer) {
             else if (id == "cps") txt = fmt::format("CPS: {}", s_clicks.size());
             else if (id == "nca") txt = fmt::format("Noclip Accuracy: {:.2f}%", accuracy());
             else if (id == "ncd") txt = fmt::format("Noclip Deaths: {}", f->ncDeaths);
+            else if (id == "bot") {
+                int bm = (int)getVal("botmode", 0);
+                char const* names[3] = {"Off", "Recording", "Replaying"};
+                txt = fmt::format("Bot {}: {} inputs, {} anchors, {} fixes", names[std::clamp(bm, 0, 2)],
+                                  s_inputs.size(), s_anchors.size(), s_fixes);
+            }
             else if (id == "jumps") txt = fmt::format("Jumps: {}", s_attemptClicks);
             else if (id == "level") txt = m_level ? std::string(m_level->m_levelName) : std::string("Level");
             else if (id == "testmode") {
@@ -1337,9 +1816,13 @@ class $modify(HMPlayLayer, PlayLayer) {
         bool blocked = f->blockedThisFrame || s_extBlock;
         s_extBlock = false;
 
-        if (opt("noclip") || opt("noclip_p1") || opt("noclip_p2") || opt("jumphack") ||
-            (opt("speedhack") && std::fabs(getVal("speed", 1.0) - 1.0) > 0.001))
-            f->cheated = true;
+        {
+            bool nc = opt("noclip") || opt("noclip_p1") || opt("noclip_p2");
+            bool sp = opt("speedhack") && std::fabs(getVal("speed", 1.0) - 1.0) > 0.001;
+            if ((nc && optd("asm_noclip", true)) || (opt("jumphack") && optd("asm_jump", true)) ||
+                (sp && optd("asm_speed", true)) || ((int)getVal("botmode", 0) == 2 && optd("asm_bot", true)))
+                f->cheated = true;
+        }
 
         f->totalFrames++;
         if (blocked) {
@@ -1364,14 +1847,14 @@ class $modify(HMPlayLayer, PlayLayer) {
         float pct = this->getCurrentPercent();
         if (pct > f->best) f->best = pct;
 
-        if (opt("jumphack")) {
+        if (opt("jumphack") && (!opt("jh_practice") || m_isPracticeMode)) {
             if (m_player1) m_player1->m_isOnGround = true;
-            if (m_player2) m_player2->m_isOnGround = true;
+            if (m_player2 && !opt("jh_p1only")) m_player2->m_isOnGround = true;
         }
 
         bool hide = opt("hideplayer");
-        if (m_player1) m_player1->setVisible(!hide);
-        if (m_player2) m_player2->setVisible(!hide);
+        if (m_player1) m_player1->setVisible(!(hide && !opt("hp_keepp1")));
+        if (m_player2) m_player2->setVisible(!(hide && !opt("hp_keepp2")));
 
         updateLabels(pct, blocked);
 
@@ -1380,7 +1863,7 @@ class $modify(HMPlayLayer, PlayLayer) {
         // no trail
         if (opt("notrail")) {
             if (m_player1 && m_player1->m_regularTrail) m_player1->m_regularTrail->setVisible(false);
-            if (m_player2 && m_player2->m_regularTrail) m_player2->m_regularTrail->setVisible(false);
+            if (m_player2 && optd("nt_p2", true) && m_player2->m_regularTrail) m_player2->m_regularTrail->setVisible(false);
         }
 
         // ── hitboxes (drawn manually) ──
@@ -1388,6 +1871,18 @@ class $modify(HMPlayLayer, PlayLayer) {
             f->hitNode->clear();
             if (opt("showhitboxes") || (opt("hitboxesondeath") && m_player1 && m_player1->m_isDead))
                 drawHitboxes(blocked);
+        }
+
+        // ── anchors ──
+        if (f->anchorNode) {
+            f->anchorNode->clear();
+            if (opt("showanchors") && m_player1) {
+                float px = m_player1->getPositionX();
+                for (auto const& a : s_anchors) {
+                    if (std::fabs(a.p1.x - px) > 500.f) continue;
+                    f->anchorNode->drawDot(CCPoint(a.p1.x, a.p1.y), 3.f, ccColor4F{1.f, 0.8f, 0.2f, 0.9f});
+                }
+            }
         }
 
         // ── trail ──
