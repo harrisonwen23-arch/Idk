@@ -16,10 +16,10 @@ jobs:
         uses: geode-sdk/build-geode-mod@main
         id: build
         with:
-          target: Android64 # Change to "iOS" if you are on iPhone/iPad
+          target: Android64 # Change to "iOS" if building for iPhone/iPad
 
       - name: Upload Mod Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: custom-menu-mod
+          name: custom-modmenu
           path: ${{ steps.build.outputs.build-output }}
