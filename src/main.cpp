@@ -279,7 +279,7 @@ static std::vector<Tab> const& tabs() {
             Tg("Force Platformer"),
             Tg("Freeze Attempts", "The attempt counter stops increasing."),
             Tg("Hide Level Complete VFX"),
-            Tg("Hide Pause Menu"),
+            Tg("Hide Pause Menu", "", "hidepause"),
             Tg("Hitbox Multiplier", "", "hbm"),
             Tg("Instant Mirror"),
             Tg("Layout Mode", "", "layout"),
@@ -295,7 +295,7 @@ static std::vector<Tab> const& tabs() {
             Tg("No Particles", "", "noparticles"),
             Tg("No Portal Lightning"),
             Tg("No Shaders"),
-            Tg("Pause Countdown", "", "pausecd"),
+            Tg("Pause Countdown", "", "pausecountdown"),
             Tg("Pause During Complete"),
             Tg("Practice Coins"),
             Tg("Practice Fix"),
@@ -343,7 +343,11 @@ static std::vector<Tab> const& tabs() {
             Bt("Save Macro", "bot_save"),
             Bt("Load Macro", "bot_load"),
         }},
-        {"Creator", { Nt("Nothing here yet.") }},
+        {"Creator", {
+            Tg("Compact Editor Levels"), Tg("Compact Profile Comments"),
+            Tg("No Short Numbers"), Tg("Show in Editor"),
+            Tg("Show Taps"), Tg("Swift Click"),
+        }},
         {"Labels", {}},   // custom page
         {"Shortcuts", {
             Bt("Restart Level", "sc_restart"),
@@ -401,6 +405,7 @@ static std::vector<Feat> const& subPage(std::string const& id) {
             Sp("Player Color", "plrcol", 0, 8, 1, 4, COLNAMES),
             Sp("Trail Color", "trailcol", 0, 8, 1, 2, COLNAMES),
             Sp("Line Thickness", "hbthick", 0.5, 3, 0.5, 1),
+            Sp("Hitbox Size", "hbmult", 0.5, 3, 0.25, 1),
         }},
         {"speedhack", { TK("speed_practice", "Only In Practice") }},
         {"autosafe", {
@@ -446,7 +451,9 @@ static bool isImpl(std::string const& k) {
         "confirmpracticemode", "hidelevelcompletevfx", "layoutmode", "noobjectglow", "noparticles",
         "novehicleparticles", "norobotfire", "noghosttrail", "nowavetrailbehind", "solidwavetrail",
         "autokill", "autoclicker", "respawndelay", "instantcomplete", "physicsbypass",
-        "confirmquit", "deathpercentpopup", "mutelevelaudioondeath"
+        "confirmquit", "deathpercentpopup", "mutelevelaudioondeath",
+        // filled in: these were placeholders before
+        "alwaysshowcoins", "hidepause"
     };
     return s.count(k) > 0;
 }
@@ -594,7 +601,7 @@ static std::vector<std::pair<char const*, char const*>> const DESC_LIST = {
     {"Accurate Percentage", "Shows decimals on the percentage label."},
     {"All Modes in Platformer", "Lets every gamemode work in platformer levels. (Not available yet.)"},
     {"All Passable", "Makes every solid block passable. (Not available yet.)"},
-    {"Always Show Coins", "Shows coins even before they are unlocked. (Not available yet.)"},
+    {"Always Show Coins", "Draws secret coins and user coins even before they are unlocked."},
     {"Auto LDM", "Turns on Low Detail Mode automatically."},
     {"Auto Pickup Coins", "Collects coins automatically. (Not available yet.)"},
     {"Auto Practice Mode", "Enters practice mode as soon as a level starts."},
@@ -606,7 +613,7 @@ static std::vector<std::pair<char const*, char const*>> const DESC_LIST = {
     {"Force Platformer", "Plays any level as a platformer. (Not available yet.)"},
     {"Freeze Attempts", "The attempt counter stops going up."},
     {"Hide Level Complete VFX", "Hides the Level Complete text and its end-of-level effects."},
-    {"Hide Pause Menu", "Hides the pause menu. (Not available yet.)"},
+    {"Hide Pause Menu", "Hides the pause button so the pause menu can't be opened in a level."},
     {"Hitbox Multiplier", "Scales the size of hitboxes. (Not available yet.)"},
     {"Instant Mirror", "Mirror portals flip instantly. (Not available yet.)"},
     {"Layout Mode", "Hides decoration objects so only the gameplay layout is visible."},
@@ -1748,6 +1755,7 @@ class $modify(HMPlayLayer, PlayLayer) {
         float clickTimer = 0.f;
         bool clickHeld = false;
         bool instDone = false;
+        std::set<GameObject*> hiddenCoins;
     };
 
     bool isSafe() {
@@ -2107,6 +2115,28 @@ class $modify(HMPlayLayer, PlayLayer) {
         }
 
         applyObjectLook();
+
+        // Always Show Coins / Practice Coins: a coin that the level hid is shown, and put
+        // back the way it was when the toggle goes off, so nothing stays forced on.
+        {
+            bool want = opt("alwaysshowcoins");
+            auto& hidden = m_fields->hiddenCoins;
+            if (want) {
+                for (auto obj : CCArrayExt<GameObject*>(m_objects)) {
+                    if (!obj) continue;
+                    auto t = obj->m_objectType;
+                    if (t != GameObjectType::SecretCoin && t != GameObjectType::UserCoin &&
+                        t != GameObjectType::Collectible) continue;
+                    if (!obj->isVisible() && !hidden.count(obj)) {
+                        hidden.insert(obj);
+                        obj->setVisible(true);
+                    }
+                }
+            } else if (!hidden.empty()) {
+                for (auto obj : hidden) if (obj) obj->setVisible(false);
+                hidden.clear();
+            }
+        }
 
         // player effect removers
         auto fx = [&](PlayerObject* p) {
