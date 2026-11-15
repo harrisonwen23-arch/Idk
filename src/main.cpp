@@ -462,10 +462,10 @@ static std::string fmtVal(Feat const& r, double v) {
 
 // ───────────────────────── bot (macro + anchors) ─────────────────────────
 struct PState { float x = 0, y = 0, rot = 0; double yv = 0; bool up = false; };
-struct Anchor { int frame = 0; bool dual = false; PState p1, p2; };
+struct BotAnchor { int frame = 0; bool dual = false; PState p1, p2; };
 struct BInput { int frame = 0; bool down = false; int button = 1; bool p1 = true; };
 static std::vector<BInput> s_inputs;
-static std::vector<Anchor> s_anchors;
+static std::vector<BotAnchor> s_anchors;
 static int s_fixes = 0;
 static bool s_injecting = false;
 
@@ -491,7 +491,7 @@ static bool offPath(PlayerObject* p, PState const& s) {
 }
 static void addAnchor(PlayLayer* pl) {
     int fr = botFrame(pl);
-    Anchor a;
+    BotAnchor a;
     a.frame = fr;
     a.p1 = snapP(pl->m_player1);
     a.dual = pl->m_gameState.m_isDualMode;
@@ -523,7 +523,7 @@ static void botStep(GJBaseGameLayer* gl) {
     // then put the player back on the path if it drifted
     if (useA) {
         auto ai = std::lower_bound(s_anchors.begin(), s_anchors.end(), fr,
-                                   [](Anchor const& a, int f) { return a.frame < f; });
+                                   [](BotAnchor const& a, int f) { return a.frame < f; });
         if (ai != s_anchors.end() && ai->frame == fr) {
             if (offPath(pl->m_player1, ai->p1)) { applyP(pl->m_player1, ai->p1); s_fixes++; }
             if (ai->dual && pl->m_gameState.m_isDualMode && offPath(pl->m_player2, ai->p2)) {
@@ -565,7 +565,7 @@ static bool loadMacro() {
             b.down = d != 0; b.p1 = p != 0;
             s_inputs.push_back(b);
         } else if (tag == "A") {
-            Anchor a; int d = 0;
+            BotAnchor a; int d = 0;
             i >> a.frame >> d;
             a.dual = d != 0;
             readP(i, a.p1); readP(i, a.p2);
@@ -1872,7 +1872,7 @@ class $modify(HMPlayLayer, PlayLayer) {
             s_inputs.erase(std::remove_if(s_inputs.begin(), s_inputs.end(),
                            [cur](BInput const& b) { return b.frame >= cur; }), s_inputs.end());
             s_anchors.erase(std::remove_if(s_anchors.begin(), s_anchors.end(),
-                            [cur](Anchor const& a) { return a.frame >= cur; }), s_anchors.end());
+                            [cur](BotAnchor const& a) { return a.frame >= cur; }), s_anchors.end());
         } else if (bm == 2 && !m_isPracticeMode) s_fixes = 0;
     }
 
@@ -2180,3 +2180,4 @@ class $modify(HMPlayLayer, PlayLayer) {
         }
     }
 };
+7
