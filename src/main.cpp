@@ -1676,9 +1676,9 @@ class $modify(GJBaseGameLayer) {
         for (int i = 0; i < n; i++) GJBaseGameLayer::update((float)(1.0 / T));
         s_tpsInner = false;
     }
-    void processCommands(float dt) {
+    void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         botStep(this);
-        GJBaseGameLayer::processCommands(dt);
+        GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
     }
 };
 
@@ -2180,4 +2180,3 @@ class $modify(HMPlayLayer, PlayLayer) {
         }
     }
 };
-7
